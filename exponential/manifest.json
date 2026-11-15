@@ -10,7 +10,8 @@
         "storage",
         "windows",
         "sidePanel",
-        "cookies"
+        "cookies",
+        "tabGroups"
     ],
     "host_permissions": [
         "<all_urls>"

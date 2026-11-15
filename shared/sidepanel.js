@@ -48,7 +48,25 @@ const savePageContext = document.getElementById('savePageContext');
 const savePageStatus = document.getElementById('savePageStatus');
 const savePageDescToggle = document.getElementById('savePageDescToggle');
 const savePageDesc = document.getElementById('savePageDesc');
-const readLaterBtn = document.getElementById('readLaterBtn');
+const resourceSaveBtn = document.getElementById('resourceSaveBtn');
+const resourceQueueToggle = document.getElementById('resourceQueueToggle');
+const resourceIndexToggle = document.getElementById('resourceIndexToggle');
+const resourceStatusEl = document.getElementById('resourceStatus');
+const resourceVisibility = document.getElementById('resourceVisibility');
+const resourceSaveGroupBtn = document.getElementById('resourceSaveGroupBtn');
+const resourceGroupPanel = document.getElementById('resourceGroupPanel');
+const projectResourcesEl = document.getElementById('projectResources');
+const projectResourcesList = document.getElementById('projectResourcesList');
+const groupLinkChip = document.getElementById('groupLinkChip');
+
+// "New project…" row under the shared project picker
+const newProjectRow = document.getElementById('newProjectRow');
+const newProjectName = document.getElementById('newProjectName');
+const newProjectRestricted = document.getElementById('newProjectRestricted');
+const newProjectHelp = document.getElementById('newProjectHelp');
+const newProjectCreate = document.getElementById('newProjectCreate');
+const newProjectCancel = document.getElementById('newProjectCancel');
+const newProjectStatus = document.getElementById('newProjectStatus');
 
 // Create Action tab elements
 const tabCreateActionBtn = document.getElementById('tabCreateAction');
@@ -435,6 +453,12 @@ let sharedGoalsCache = [];
 let sharedProjectsCache = [];
 let sharedLoadSeq = 0;
 
+// The picker's last entry opens the create row; it is never a project id.
+const NEW_PROJECT_VALUE = '__new__';
+// The project the picker held before "New project…" was chosen, so choosing it
+// (or cancelling) leaves the selection where it was.
+let lastRealProjectId = '';
+
 function renderSharedGoals(preselectId) {
     if (!sharedGoal) return;
     sharedGoal.innerHTML = '<option value="" data-searchable-keep>All goals</option>';
@@ -467,6 +491,12 @@ function renderSharedProjects(preselectId) {
         if (project.slug) option.dataset.slug = project.slug;
         sharedProject.appendChild(option);
     });
+    // Always last, and still listed while the filter has text in it.
+    const newOption = document.createElement('option');
+    newOption.value = NEW_PROJECT_VALUE;
+    newOption.textContent = 'New project…';
+    newOption.setAttribute('data-searchable-always', '');
+    sharedProject.appendChild(newOption);
 
     if (preselectId && projects.some(p => p.id === preselectId)) {
         sharedProject.value = preselectId;
@@ -478,6 +508,8 @@ function renderSharedProjects(preselectId) {
     } else {
         sharedProject.value = '';
     }
+    lastRealProjectId = sharedProject.value;
+    syncResourceProjectUi();
 }
 
 async function loadSharedGoalsAndProjects(workspaceId, { goalId, projectId } = {}) {
@@ -742,9 +774,11 @@ function makeSearchableSelect(select) {
         const q = query.trim().toLowerCase();
         list.innerHTML = '';
         // Empty-value options are placeholders unless explicitly kept (e.g. "All goals").
+        // An option marked data-searchable-always survives any filter text
+        // (e.g. "New project…", so a name that matches nothing can be created).
         matches = Array.from(select.options).filter(o =>
             (o.value || o.hasAttribute('data-searchable-keep')) &&
-            (!q || o.textContent.toLowerCase().includes(q)));
+            (!q || o.hasAttribute('data-searchable-always') || o.textContent.toLowerCase().includes(q)));
         if (matches.length === 0) {
             const li = document.createElement('li');
             li.className = 'searchable-select-empty';
@@ -861,6 +895,7 @@ if (sharedWorkspace) {
         }
         // Goals belong to a workspace, so a workspace change resets the goal filter.
         chrome.storage.local.remove('SELECTED_GOAL_ID');
+        updateNewProjectHelp();
         await loadSharedGoalsAndProjects(workspaceId);
     });
 }
@@ -882,10 +917,18 @@ if (sharedGoal) {
 if (sharedProject) {
     sharedProject.addEventListener('change', () => {
         const projectId = sharedProject.value;
+        if (projectId === NEW_PROJECT_VALUE) {
+            // Not a project: nothing is persisted and a recording keeps running.
+            sharedProject.value = lastRealProjectId;
+            openNewProjectRowForActiveTab();
+            return;
+        }
+        lastRealProjectId = projectId;
         if (projectId) {
             if (isListening) stopListening();
             chrome.storage.local.set({ SELECTED_PROJECT_ID: projectId });
         }
+        syncResourceProjectUi();
     });
 }
 
@@ -2867,6 +2910,1026 @@ function renderRecentItems(category) {
     });
 }
 
+// ── Resources tab ────────────────────────────────────────────────────────
+// Files the open page, or every tab of a tab group, as a Resource under the
+// selected project. Rule from docs/adr/0001: nothing about a page leaves the
+// browser until Save is pressed. "Is this page already saved?" is answered by
+// matching against a list downloaded once, never by asking the server.
+
+function isWebUrl(url) {
+    return /^https?:/i.test(url || '');
+}
+
+function hostOf(url) {
+    try {
+        return new URL(url).host.replace(/^www\./, '');
+    } catch (_) {
+        return '';
+    }
+}
+
+// The shared picker's project as { id, name }, or null when none is selected.
+function selectedProject() {
+    if (!sharedProject) return null;
+    const id = sharedProject.value;
+    if (!id || id === 'default' || id === NEW_PROJECT_VALUE) return null;
+    const option = sharedProject.selectedOptions[0];
+    return { id, name: option ? option.textContent : '' };
+}
+
+function projectNameFor(projectId) {
+    const project = sharedProjectsCache.find(p => p.id === projectId);
+    return project ? project.name : '';
+}
+
+function ownerLabel(owner) {
+    const name = owner && (owner.ownerName || owner.name);
+    return name || 'a teammate';
+}
+
+function setSavePageStatus(text, kind) {
+    if (!savePageStatus) return;
+    savePageStatus.textContent = text;
+    savePageStatus.className = kind ? `save-page-status ${kind}` : 'save-page-status';
+}
+
+// A tRPC error body: its message, and the structured refusal the server sends
+// when a project already lists the page (`error.data.alreadyInProject`).
+async function readTrpcError(response, fallback) {
+    const body = await response.json().catch(() => ({}));
+    const error = (body && body.error && body.error.json) || {};
+    const message = typeof error.message === 'string' && error.message.trim() ? error.message : fallback;
+    return { message, alreadyInProject: (error.data && error.data.alreadyInProject) || null };
+}
+
+// --- Saved-page list, matched in the browser ---
+
+// Identity -> the Resources the caller can see for that page. In memory only:
+// it is refetched when the panel opens and after each save.
+let resourceIdentityIndex = new Map();
+let resourceIdentitiesLoaded = false;
+let resourceIdentitiesSeq = 0;
+
+// The only request the status line ever causes. It carries no URL, title or
+// content: the first page has no input at all, later pages only the cursor
+// the server handed back.
+async function refreshResourceIdentities() {
+    if (!hasSavePage) return;
+    const seq = ++resourceIdentitiesSeq;
+    try {
+        const next = new Map();
+        let cursor;
+        do {
+            const json = await trpcCall('resource.identities', cursor ? { cursor } : undefined, 'GET');
+            const data = extractTrpcData(json) || {};
+            for (const item of data.items || []) {
+                if (!item.identity) continue;
+                const entry = {
+                    id: item.id,
+                    title: item.title,
+                    projectId: item.project ? item.project.id : null,
+                    projectName: item.project ? item.project.name : null,
+                    workspaceId: item.workspaceId || null,
+                    ownerName: item.owner ? item.owner.name : null,
+                    isMine: item.isMine === true,
+                    readStatus: item.readStatus || null,
+                };
+                const entries = next.get(item.identity);
+                if (entries) entries.push(entry);
+                else next.set(item.identity, [entry]);
+            }
+            cursor = data.nextCursor;
+        } while (cursor);
+        // A newer refresh started while this one was in flight.
+        if (seq !== resourceIdentitiesSeq) return;
+        resourceIdentityIndex = next;
+        resourceIdentitiesLoaded = true;
+    } catch (e) {
+        console.warn('Could not load the saved-page list:', e.message);
+    }
+    updateResourceStatus();
+}
+
+// The caller's own Resource for a page and a teammate's, preferring the ones
+// filed under `project`. Rows that pre-date identity were never merged, so a
+// page can have more than one of each.
+function entriesForPage(identity, project) {
+    const entries = identity ? resourceIdentityIndex.get(identity) || [] : [];
+    const mine = entries.filter(e => e.isMine);
+    const others = entries.filter(e => !e.isMine);
+    const inProject = (list) => (project ? list.find(e => e.projectId === project.id) : null) || null;
+    return {
+        mine: inProject(mine) || mine[0] || null,
+        other: inProject(others) || others[0] || null,
+        otherInProject: inProject(others),
+    };
+}
+
+// --- Status line ---
+
+function resourcesTabVisible() {
+    return hasSavePage && !!panelSavePage && panelSavePage.classList.contains('active') &&
+        !dictationUI.classList.contains('hidden');
+}
+
+// The URL the page declares for itself, read inside the tab. Nothing is sent
+// anywhere; a page that can't be scripted simply has none.
+async function readDeclaredUrl(tabId) {
+    try {
+        const [injection] = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: () => document.querySelector('link[rel="canonical"]')?.href ||
+                document.querySelector('meta[property="og:url"]')?.content || null,
+        });
+        return (injection && injection.result) || null;
+    } catch (_) {
+        return null;
+    }
+}
+
+// What the status line last worked out about the open page; null until it has
+// looked at one.
+let currentPage = null;
+let resourceStatusSeq = 0;
+// Save is held back while it could only be refused (see renderResourceStatus),
+// and while a save is in flight.
+let resourceSaveBlocked = false;
+let resourceSaveBusy = false;
+
+function applyResourceSaveEnabled() {
+    if (!resourceSaveBtn) return;
+    resourceSaveBtn.disabled = resourceSaveBusy || resourceSaveBlocked;
+    resourceSaveBtn.title = resourceSaveBlocked ? 'Already in this project' : '';
+}
+
+async function updateResourceStatus() {
+    if (!resourceStatusEl || !resourcesTabVisible()) return;
+    // A newer call (another tab, another page) supersedes this one.
+    const seq = ++resourceStatusSeq;
+    const tab = await getActiveNormalTab();
+    if (seq !== resourceStatusSeq) return;
+    let page = { savable: false, identity: null };
+    if (tab && isWebUrl(tab.url)) {
+        const declaredUrl = await readDeclaredUrl(tab.id);
+        if (seq !== resourceStatusSeq) return;
+        page = { savable: true, identity: ExpoPageIdentity.pageIdentity(tab.url, declaredUrl) };
+    }
+    // The outcome of the last save was about the page that was open then.
+    const pageChanged = !!currentPage && currentPage.identity !== page.identity;
+    if (pageChanged && !groupSave) setSavePageStatus('');
+    currentPage = page;
+    renderResourceStatus();
+}
+
+// Redraws the status line from what is already known: no tab is read and
+// nothing is fetched, so it is safe to call on every toggle and selection.
+function renderResourceStatus() {
+    if (!resourceStatusEl) return;
+    resourceStatusEl.textContent = '';
+    resourceStatusEl.className = 'resource-status';
+    resourceSaveBlocked = false;
+
+    const addText = (text, className) => {
+        const span = document.createElement('span');
+        if (className) span.className = className;
+        span.textContent = text;
+        resourceStatusEl.appendChild(span);
+        return span;
+    };
+
+    if (!currentPage) {
+        applyResourceSaveEnabled();
+        return;
+    }
+    if (!currentPage.savable) {
+        addText("This page can't be saved");
+        applyResourceSaveEnabled();
+        return;
+    }
+    // Until the list has loaded we cannot say either way, so say nothing.
+    if (!currentPage.identity || !resourceIdentitiesLoaded) {
+        applyResourceSaveEnabled();
+        return;
+    }
+
+    const project = selectedProject();
+    const { mine, other, otherInProject } = entriesForPage(currentPage.identity, project);
+    const queued = (entry) => entry.readStatus === 'to_read' || entry.readStatus === 'reading';
+    const queueTicked = !!(resourceQueueToggle && resourceQueueToggle.checked);
+    let hint = '';
+    // Whether the line names the teammate's Resource (true) or the caller's own.
+    let namesOther = false;
+
+    if (mine && (mine.projectId || !other)) {
+        resourceStatusEl.classList.add('saved');
+        addText((mine.projectId ? `Saved in ${mine.projectName || 'a project'}` : 'Saved (no project)') +
+            (queued(mine) ? ' · on your Reading list' : ''));
+    } else if (other) {
+        namesOther = true;
+        resourceStatusEl.classList.add('saved');
+        let text = `In ${other.projectName || 'a project'}, saved by ${ownerLabel(other)}`;
+        if (mine) text += queued(mine) ? ' · on your Reading list' : ' · also saved by you';
+        addText(text);
+        // A project lists a page once. Filing it there again would be refused,
+        // but the page can still go on the caller's own Reading list.
+        if (!mine && otherInProject && !queueTicked) {
+            resourceSaveBlocked = true;
+            hint = 'Already in this project';
+        }
+    } else {
+        addText('Not saved yet');
+    }
+
+    // Saving again never moves a Resource; moving is this button and nothing else.
+    if (mine && project && project.id !== mine.projectId) {
+        if (otherInProject) {
+            // No move into a project that already lists the page.
+            if (!namesOther) hint = `Already in ${project.name}, saved by ${ownerLabel(otherInProject)}`;
+        } else {
+            const moveBtn = document.createElement('button');
+            moveBtn.className = 'btn-inline';
+            moveBtn.textContent = `Move to ${project.name}`;
+            moveBtn.addEventListener('click', () => moveResourceToProject(mine, project, moveBtn));
+            resourceStatusEl.appendChild(moveBtn);
+        }
+    }
+    if (hint) addText(hint, 'resource-status-hint');
+    applyResourceSaveEnabled();
+}
+
+async function moveResourceToProject(entry, project, button) {
+    button.disabled = true;
+    button.textContent = 'Moving...';
+    setSavePageStatus('');
+    try {
+        const response = await authenticatedFetch(`${apiBaseURL}/api/trpc/resource.update`, {
+            method: 'POST',
+            body: JSON.stringify({ json: { id: entry.id, projectId: project.id } }),
+        });
+        if (!response.ok) {
+            const error = await readTrpcError(response, 'Could not move the page');
+            // The list was stale: a teammate filed the page there first.
+            if (error.alreadyInProject) {
+                setSavePageStatus(`Already in this project, saved by ${ownerLabel(error.alreadyInProject.owner)}`, 'error');
+                await refreshResourceIdentities();
+                return;
+            }
+            throw new Error(error.message);
+        }
+        await refreshResourceIdentities();
+        setSavePageStatus(`Moved to ${project.name}`, 'success');
+        loadProjectResources();
+    } catch (error) {
+        console.error('Error moving resource:', error);
+        setSavePageStatus(error.message || 'Network error', 'error');
+        renderResourceStatus();
+    }
+}
+
+// --- Saving ---
+
+// Saves one tab as a Resource. Used for the open page and, once per tab, by
+// the tab-group save, so both file a page in exactly the same way.
+//
+//   queue        also put it on the Reading list (off = a save for reference)
+//   index        "Add to knowledge": embed the text for search
+//   description  the user's note; falls back to the page's own excerpt
+//   skipExtract  save title and address only, without touching the tab
+//   project      { id, name } to file under, or null for none; when omitted,
+//                the shared picker's project
+async function saveTabAsResource(tab, { queue = false, index = false, description, skipExtract = false, project } = {}) {
+    const result = {
+        ok: false, created: false, hadBody: false, hadPageText: false, queued: !!queue,
+        error: null, alreadyInProject: null, projectId: null, projectName: '',
+    };
+    try {
+        // The address the Resource's link opens: the visit without tracking
+        // parameters. The server works out the identity itself.
+        const url = tab ? ExpoPageIdentity.savedAddress(tab.url || '') : null;
+        if (!url) {
+            result.error = 'Only web pages can be saved';
+            return result;
+        }
+
+        const article = skipExtract ? null : await extractArticle(tab.id);
+        // An article sends its body; any other page sends its visible text as
+        // Page text; a page with neither is a bare link. A page Readability
+        // can parse but isProbablyReaderable rejects used to be saved with the
+        // Readability output as its body. For listings and searches that
+        // output is fragments, so such a page now sends Page text instead.
+        const body = article && article.readerable && article.content &&
+            article.content.length <= MAX_ARTICLE_HTML_CHARS
+            ? article.content
+            : undefined;
+        const pageText = !body && article && article.pageText ? article.pageText : undefined;
+        const declaredUrl = article && article.declaredUrl ? article.declaredUrl : undefined;
+
+        if (project === undefined) {
+            const selectedId = await getSelectedProjectId();
+            project = selectedId && selectedId !== 'default'
+                ? { id: selectedId, name: projectNameFor(selectedId) }
+                : null;
+        }
+        let workspaceId = sharedWorkspace ? sharedWorkspace.value : '';
+
+        // Matching happens here, in the browser, against the downloaded list.
+        const identity = ExpoPageIdentity.pageIdentity(tab.url, declaredUrl);
+        const { mine, otherInProject } = entriesForPage(identity, project);
+        if (mine) {
+            // Saving a page that is already saved never moves it: it stays
+            // under the project (or none) it has. Moving is the explicit
+            // "Move to" button in the status line.
+            project = mine.projectId ? { id: mine.projectId, name: mine.projectName || '' } : null;
+            workspaceId = mine.workspaceId || '';
+        } else if (otherInProject && queue) {
+            // A teammate already filed this page under the project, and a
+            // project lists a page once. The caller still gets their own
+            // Resource for their Reading list, with no project.
+            project = null;
+        }
+
+        const input = {
+            title: tab.title || (article && article.title) || url,
+            url,
+            contentType: body || pageText ? 'web_page' : 'bookmark',
+            // Off the Reading list unless asked: `forReference` files the page
+            // and leaves any read state it already has alone.
+            readStatus: queue ? 'to_read' : 'read',
+            forReference: !queue,
+            generateEmbeddings: !!index,
+        };
+        if (declaredUrl) input.declaredUrl = declaredUrl;
+        const text = description || (article && article.excerpt);
+        if (text) input.description = text;
+        if (body) input.rawContent = body;
+        if (pageText) input.pageText = pageText;
+        if (article && article.byline) input.author = article.byline;
+        if (article && article.publishedTime && !isNaN(Date.parse(article.publishedTime))) {
+            input.publishedAt = new Date(article.publishedTime).toISOString();
+        }
+        if (workspaceId) input.workspaceId = workspaceId;
+        if (project) input.projectId = project.id;
+
+        result.hadBody = !!body;
+        result.hadPageText = !!pageText;
+        result.projectId = project ? project.id : null;
+        result.projectName = project ? project.name : '';
+
+        const response = await authenticatedFetch(`${apiBaseURL}/api/trpc/resource.create`, {
+            method: 'POST',
+            body: JSON.stringify({ json: input }),
+        });
+        if (!response.ok) {
+            const error = await readTrpcError(response, 'Failed to save');
+            // The downloaded list was stale and the project already lists the page.
+            if (error.alreadyInProject) {
+                result.alreadyInProject = error.alreadyInProject;
+                result.error = `Already in this project, saved by ${ownerLabel(error.alreadyInProject.owner)}`;
+            } else {
+                result.error = error.message;
+            }
+            return result;
+        }
+        const data = extractTrpcData(await response.json()) || {};
+        result.ok = true;
+        result.created = data.created !== false;
+        result.alreadyInProject = data.alreadyInProject || null;
+        return result;
+    } catch (error) {
+        console.error('Error saving resource:', error);
+        result.error = error.message || 'Network error';
+        return result;
+    }
+}
+
+function describeSave(result) {
+    let text = 'Already saved, updated';
+    if (result.created) {
+        text = result.projectId ? `Saved to ${result.projectName || 'project'}` : 'Saved (no project)';
+    }
+    if (result.queued) text += ' and added to Reading list';
+    if (result.hadPageText) text += ' (page text saved for search)';
+    else if (!result.hadBody) text += ' (link only, no page text)';
+    return text;
+}
+
+async function handleResourceSave() {
+    setSavePageStatus('');
+    const tab = await getActiveNormalTab();
+    if (!tab || !isWebUrl(tab.url)) {
+        setSavePageStatus('Only web pages can be saved', 'error');
+        return;
+    }
+    resourceSaveBusy = true;
+    applyResourceSaveEnabled();
+    resourceSaveBtn.textContent = 'Saving...';
+
+    const note = savePageContext ? savePageContext.value.trim() : '';
+    const userDescription = (savePageDescToggle && savePageDescToggle.checked && savePageDesc)
+        ? savePageDesc.value.trim()
+        : '';
+    const result = await saveTabAsResource(tab, {
+        queue: !!(resourceQueueToggle && resourceQueueToggle.checked),
+        index: !!(resourceIndexToggle && resourceIndexToggle.checked),
+        description: userDescription || note || undefined,
+    });
+
+    if (result.ok) {
+        addRecentItem('savePage', { name: tab.title || tab.url, url: getReadingListUrl() });
+        resourceSaveBtn.textContent = 'Saved!';
+        setSavePageStatus(describeSave(result), 'success');
+        if (savePageContext) savePageContext.value = '';
+        if (savePageDesc) savePageDesc.value = '';
+        refreshResourceIdentities();
+        loadProjectResources();
+    } else {
+        resourceSaveBtn.textContent = 'Save Failed';
+        setSavePageStatus(result.error || 'Failed to save', 'error');
+        if (result.alreadyInProject) refreshResourceIdentities();
+    }
+    setTimeout(() => {
+        resourceSaveBusy = false;
+        resourceSaveBtn.textContent = 'Save';
+        applyResourceSaveEnabled();
+    }, 2000);
+}
+
+// --- Project selection: who will see a save, and what follows the picker ---
+
+let resourceUiProjectId;
+
+// Called whenever the shared picker's project may have changed: by hand, or
+// because the list was reloaded for another workspace or goal.
+function syncResourceProjectUi() {
+    if (!hasSavePage) return;
+    const project = selectedProject();
+    if (resourceVisibility) {
+        // Filing under a project shares the page with its members.
+        resourceVisibility.textContent = project
+            ? `Visible to everyone who can see ${project.name}`
+            : 'Only you can see this';
+    }
+    const projectId = project ? project.id : '';
+    if (projectId === resourceUiProjectId) return;
+    resourceUiProjectId = projectId;
+    // "Add to knowledge" follows the project until the user sets it by hand,
+    // and again from the next change of project.
+    if (resourceIndexToggle) resourceIndexToggle.checked = !!project;
+    renderResourceStatus();
+    renderGroupConfirmState();
+    loadProjectResources();
+    updateGroupLinkChip();
+}
+
+// --- "In this project" list ---
+
+let projectResourcesSeq = 0;
+
+async function loadProjectResources() {
+    if (!projectResourcesEl || !projectResourcesList || !resourcesTabVisible()) return;
+    const seq = ++projectResourcesSeq;
+    const project = selectedProject();
+    if (!project) {
+        projectResourcesEl.style.display = 'none';
+        return;
+    }
+    try {
+        const json = await trpcCall('resource.list', { projectId: project.id, limit: 20 }, 'GET');
+        if (seq !== projectResourcesSeq) return;
+        const data = extractTrpcData(json) || {};
+        renderProjectResources(data.resources || []);
+        projectResourcesEl.style.display = '';
+    } catch (e) {
+        // The list is a convenience: without it, saving works as before.
+        console.warn('Could not load project resources:', e.message);
+        if (seq === projectResourcesSeq) projectResourcesEl.style.display = 'none';
+    }
+}
+
+function renderProjectResources(rows) {
+    projectResourcesList.textContent = '';
+    if (rows.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'project-resources-empty';
+        empty.textContent = 'No pages filed under this project yet.';
+        projectResourcesList.appendChild(empty);
+        return;
+    }
+    rows.forEach((resource) => {
+        const opens = isWebUrl(resource.url);
+        const row = document.createElement('div');
+        row.className = 'recording-action-link' + (opens ? '' : ' recent-item-static');
+        row.innerHTML = RECENT_ITEM_ICONS.savePage;
+
+        const name = document.createElement('span');
+        name.className = 'recording-action-link-name';
+        name.textContent = resource.title || resource.url || 'Untitled';
+        row.appendChild(name);
+
+        const parts = [];
+        const host = hostOf(resource.url);
+        if (host) parts.push(host);
+        if (resource.createdAt) {
+            const saved = new Date(resource.createdAt);
+            if (!isNaN(saved)) parts.push(saved.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }));
+        }
+        // Present on a page another member of the project filed.
+        if (resource.isMine === false) parts.push(`saved by ${ownerLabel(resource.owner)}`);
+        const meta = document.createElement('span');
+        meta.className = 'project-resource-meta';
+        meta.textContent = parts.join(' · ');
+        row.appendChild(meta);
+        row.title = [resource.title, ...parts].filter(Boolean).join(' · ');
+
+        if (opens) {
+            const open = () => chrome.tabs.create({ url: resource.url });
+            row.setAttribute('role', 'link');
+            row.tabIndex = 0;
+            row.addEventListener('click', open);
+            row.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') open();
+            });
+        }
+        projectResourcesList.appendChild(row);
+    });
+}
+
+// --- Tab group: save every tab of the current group under one project ---
+
+// The active tab's group as { id, windowId, title }, or null when it is in no
+// group or this extension has no tabGroups permission (Tradescape).
+async function getActiveTabGroup() {
+    if (!chrome.tabGroups) return null;
+    const tab = await getActiveNormalTab();
+    if (!tab || tab.groupId === undefined || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) return null;
+    try {
+        const group = await chrome.tabGroups.get(tab.groupId);
+        return { id: tab.groupId, windowId: tab.windowId, title: (group.title || '').trim() };
+    } catch (_) {
+        return null;
+    }
+}
+
+async function tabsInGroup(group) {
+    const tabs = await chrome.tabs.query({ groupId: group.id, windowId: group.windowId });
+    return tabs.sort((a, b) => a.index - b.index);
+}
+
+let groupButtonSeq = 0;
+
+async function refreshGroupSaveButton() {
+    if (!hasSavePage || !resourceSaveGroupBtn) return;
+    const seq = ++groupButtonSeq;
+    const group = await getActiveTabGroup();
+    const tabs = group ? await tabsInGroup(group) : [];
+    if (seq !== groupButtonSeq) return;
+    if (!group || tabs.length === 0) {
+        resourceSaveGroupBtn.hidden = true;
+        return;
+    }
+    const groupName = group.title ? `"${group.title}"` : 'this group';
+    resourceSaveGroupBtn.textContent = `Save ${tabs.length} ${tabs.length === 1 ? 'tab' : 'tabs'} in ${groupName}`;
+    resourceSaveGroupBtn.hidden = false;
+}
+
+// The open checklist: { group, rows: [{ tab, checkbox, outcome }], note,
+// confirmBtn, cancelBtn, running, finished }.
+let groupSave = null;
+
+function closeGroupChecklist() {
+    if (groupSave && groupSave.running) return;
+    groupSave = null;
+    if (resourceGroupPanel) {
+        resourceGroupPanel.hidden = true;
+        resourceGroupPanel.textContent = '';
+    }
+}
+
+async function openGroupChecklist() {
+    if (!resourceGroupPanel || (groupSave && groupSave.running)) return;
+    const group = await getActiveTabGroup();
+    if (!group) {
+        refreshGroupSaveButton();
+        return;
+    }
+    const tabs = await tabsInGroup(group);
+    setSavePageStatus('');
+    resourceGroupPanel.textContent = '';
+
+    const list = document.createElement('div');
+    list.className = 'resource-group-list';
+    const rows = tabs.map((tab) => {
+        const reason = !isWebUrl(tab.url) ? "Can't be saved" : (tab.incognito ? 'Incognito tab' : '');
+        const row = document.createElement('label');
+        row.className = 'resource-group-row' + (reason ? ' is-disabled' : '');
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = !reason;
+        checkbox.disabled = !!reason;
+        checkbox.addEventListener('change', renderGroupConfirmState);
+        row.appendChild(checkbox);
+
+        const text = document.createElement('span');
+        text.className = 'resource-group-row-text';
+        const title = document.createElement('span');
+        title.className = 'resource-group-row-title';
+        title.textContent = tab.title || tab.url || 'Untitled';
+        title.title = title.textContent;
+        const host = document.createElement('span');
+        host.className = 'resource-group-row-host';
+        host.textContent = hostOf(tab.url) || tab.url || '';
+        text.appendChild(title);
+        text.appendChild(host);
+        row.appendChild(text);
+
+        const outcome = document.createElement('span');
+        outcome.className = 'resource-group-row-outcome';
+        outcome.textContent = reason;
+        row.appendChild(outcome);
+
+        list.appendChild(row);
+        return { tab, checkbox, outcome };
+    });
+    resourceGroupPanel.appendChild(list);
+
+    const note = document.createElement('div');
+    note.className = 'resource-group-note';
+    resourceGroupPanel.appendChild(note);
+
+    const buttons = document.createElement('div');
+    buttons.className = 'button-row';
+    const confirmBtn = document.createElement('button');
+    confirmBtn.className = 'btn-save-page';
+    confirmBtn.addEventListener('click', runGroupSave);
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn-cancel';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', closeGroupChecklist);
+    buttons.appendChild(confirmBtn);
+    buttons.appendChild(cancelBtn);
+    resourceGroupPanel.appendChild(buttons);
+
+    groupSave = { group, rows, note, confirmBtn, cancelBtn, running: false, finished: false };
+    resourceGroupPanel.hidden = false;
+    renderGroupConfirmState();
+}
+
+// A group save needs a project: the point is to file the tabs together.
+function renderGroupConfirmState() {
+    if (!groupSave || groupSave.running || groupSave.finished) return;
+    const project = selectedProject();
+    const count = groupSave.rows.filter(r => r.checkbox.checked && !r.checkbox.disabled).length;
+    const pages = `${count} ${count === 1 ? 'page' : 'pages'}`;
+    groupSave.confirmBtn.textContent = project ? `Save ${pages} to ${project.name}` : `Save ${pages}`;
+    groupSave.confirmBtn.disabled = !project || count === 0;
+    groupSave.note.textContent = project ? '' : 'Choose a project first';
+    groupSave.note.className = 'resource-group-note' + (project ? '' : ' error');
+}
+
+// Saves the ticked tabs one at a time, in tab order. No tab is closed, moved,
+// reloaded or activated: a tab is only read, and a discarded one not even that.
+async function runGroupSave() {
+    const state = groupSave;
+    const project = selectedProject();
+    if (!state || state.running || state.finished || !project) {
+        renderGroupConfirmState();
+        return;
+    }
+    const targets = state.rows.filter(r => r.checkbox.checked && !r.checkbox.disabled);
+    if (targets.length === 0) return;
+
+    state.running = true;
+    state.rows.forEach(r => { r.checkbox.disabled = true; });
+    state.confirmBtn.disabled = true;
+    state.cancelBtn.disabled = true;
+    state.note.className = 'resource-group-note';
+    setSavePageStatus('');
+
+    const queue = !!(resourceQueueToggle && resourceQueueToggle.checked);
+    const index = !!(resourceIndexToggle && resourceIndexToggle.checked);
+    const workspaceId = sharedWorkspace ? sharedWorkspace.value : '';
+    const counts = { saved: 0, updated: 0, inProject: 0, failed: 0 };
+    const setOutcome = (row, text, kind) => {
+        row.outcome.textContent = text;
+        row.outcome.title = text;
+        row.outcome.className = 'resource-group-row-outcome' + (kind ? ` ${kind}` : '');
+    };
+
+    for (let i = 0; i < targets.length; i++) {
+        const row = targets[i];
+        const progress = `Saving ${i + 1} of ${targets.length}...`;
+        state.note.textContent = progress;
+        state.confirmBtn.textContent = progress;
+        setOutcome(row, 'Saving...');
+        try {
+            // The tab as it is now: it may have been discarded, navigated or
+            // closed since the checklist opened.
+            const tab = await chrome.tabs.get(row.tab.id);
+            // A discarded tab is saved as a bare link. Reading it would mean
+            // reloading it, which a save must never do.
+            const skipExtract = tab.discarded === true;
+
+            // A page the project already lists, whoever saved it, is skipped
+            // without a request. Read from the tab, matched in the browser.
+            const declaredUrl = skipExtract ? null : await readDeclaredUrl(tab.id);
+            const identity = ExpoPageIdentity.pageIdentity(tab.url, declaredUrl);
+            const entries = identity ? resourceIdentityIndex.get(identity) || [] : [];
+            if (entries.some(e => e.projectId === project.id)) {
+                counts.inProject++;
+                setOutcome(row, 'Already in this project');
+                continue;
+            }
+
+            const result = await saveTabAsResource(tab, { queue, index, skipExtract, project });
+            if (result.ok && result.created) {
+                counts.saved++;
+                setOutcome(row, 'Saved', 'success');
+            } else if (result.ok) {
+                counts.updated++;
+                // Saving never moves a page, so say where it stays.
+                setOutcome(row, result.projectId === project.id
+                    ? 'Already saved, updated'
+                    : `Already saved in ${result.projectName || 'no project'}, updated`, 'success');
+            } else if (result.alreadyInProject) {
+                counts.inProject++;
+                setOutcome(row, result.error);
+            } else {
+                counts.failed++;
+                setOutcome(row, `Failed: ${result.error || 'unknown error'}`, 'error');
+            }
+        } catch (error) {
+            counts.failed++;
+            setOutcome(row, `Failed: ${error.message || 'tab is no longer open'}`, 'error');
+        }
+    }
+
+    state.running = false;
+    state.finished = true;
+    state.note.textContent = 'Done. Every tab is still open.';
+    state.confirmBtn.hidden = true;
+    state.cancelBtn.disabled = false;
+    state.cancelBtn.textContent = 'Close';
+
+    let summary = `Saved ${counts.saved}, already saved ${counts.updated}, failed ${counts.failed}`;
+    if (counts.inProject > 0) summary += `, already in this project ${counts.inProject}`;
+    setSavePageStatus(summary, counts.failed > 0 ? 'error' : 'success');
+
+    refreshResourceIdentities();
+    loadProjectResources();
+    // The group now belongs with this project: remember it, to suggest the
+    // project next time a tab of the group is in front.
+    if (counts.saved + counts.updated > 0) {
+        let title = state.group.title;
+        try {
+            title = ((await chrome.tabGroups.get(state.group.id)).title || '').trim();
+        } catch (_) {}
+        await rememberGroupLink(title, project, workspaceId);
+    }
+}
+
+// --- Tab group -> project link, suggested and never applied on its own ---
+
+// Keyed by the group's title, trimmed and lowercased, because Chrome's group
+// ids do not survive a restart. A group with no title is never linked.
+const TAB_GROUP_LINKS_KEY = 'TAB_GROUP_PROJECT_LINKS';
+// Group ids whose suggestion was dismissed, until the panel is reloaded.
+const dismissedGroupLinkIds = new Set();
+let groupLinkChipSeq = 0;
+// While the chip shows a one-off message, updates leave it alone.
+let groupLinkChipHoldUntil = 0;
+
+function groupLinkKey(title) {
+    return (title || '').trim().toLowerCase();
+}
+
+async function loadGroupLinks() {
+    const stored = await chrome.storage.local.get([TAB_GROUP_LINKS_KEY]);
+    const links = stored && stored[TAB_GROUP_LINKS_KEY];
+    return links && typeof links === 'object' ? links : {};
+}
+
+async function rememberGroupLink(title, project, workspaceId) {
+    const key = groupLinkKey(title);
+    if (!key) return;
+    const links = await loadGroupLinks();
+    links[key] = {
+        projectId: project.id,
+        projectName: project.name,
+        workspaceId: workspaceId || '',
+        title: title.trim(),
+    };
+    await chrome.storage.local.set({ [TAB_GROUP_LINKS_KEY]: links });
+    updateGroupLinkChip();
+}
+
+async function forgetGroupLink(key) {
+    const links = await loadGroupLinks();
+    delete links[key];
+    await chrome.storage.local.set({ [TAB_GROUP_LINKS_KEY]: links });
+}
+
+async function updateGroupLinkChip() {
+    if (!hasSavePage || !groupLinkChip) return;
+    if (Date.now() < groupLinkChipHoldUntil) return;
+    const seq = ++groupLinkChipSeq;
+    const hide = () => {
+        groupLinkChip.hidden = true;
+        groupLinkChip.textContent = '';
+    };
+    const group = await getActiveTabGroup();
+    if (seq !== groupLinkChipSeq) return;
+    if (!group || !group.title || dismissedGroupLinkIds.has(group.id)) return hide();
+    const key = groupLinkKey(group.title);
+    const link = (await loadGroupLinks())[key];
+    if (seq !== groupLinkChipSeq) return;
+    const selected = selectedProject();
+    if (!link || !link.projectId || (selected && selected.id === link.projectId)) return hide();
+
+    groupLinkChip.textContent = '';
+    const text = document.createElement('span');
+    text.className = 'group-link-chip-text';
+    text.textContent = `This group is linked to ${link.projectName || 'a project'}.`;
+    const switchBtn = document.createElement('button');
+    switchBtn.className = 'btn-inline btn-inline-primary';
+    switchBtn.textContent = 'Switch';
+    switchBtn.addEventListener('click', () => switchToLinkedProject(key, link, switchBtn));
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'group-link-chip-dismiss';
+    dismissBtn.textContent = '×';
+    dismissBtn.title = 'Dismiss';
+    dismissBtn.setAttribute('aria-label', 'Dismiss');
+    dismissBtn.addEventListener('click', () => {
+        dismissedGroupLinkIds.add(group.id);
+        hide();
+    });
+    groupLinkChip.appendChild(text);
+    groupLinkChip.appendChild(switchBtn);
+    groupLinkChip.appendChild(dismissBtn);
+    groupLinkChip.hidden = false;
+}
+
+function showGroupLinkChipMessage(message) {
+    groupLinkChipHoldUntil = Date.now() + 4000;
+    groupLinkChip.textContent = '';
+    const text = document.createElement('span');
+    text.className = 'group-link-chip-text';
+    text.textContent = message;
+    groupLinkChip.appendChild(text);
+    groupLinkChip.hidden = false;
+    setTimeout(() => {
+        groupLinkChipHoldUntil = 0;
+        groupLinkChip.hidden = true;
+        groupLinkChip.textContent = '';
+        updateGroupLinkChip();
+    }, 4000);
+}
+
+// The only way the linked project is ever selected: a click on Switch. It goes
+// through the picker's own path, so everything that follows a project change
+// (persisting it, the Resources tab) happens exactly as if chosen by hand.
+async function switchToLinkedProject(key, link, button) {
+    button.disabled = true;
+    const workspaceId = link.workspaceId || '';
+    try {
+        // Check first, so a project that has gone does not cost the user the
+        // workspace and project they have selected now.
+        const workspaceListed = !workspaceId ||
+            Array.from(sharedWorkspace.options).some(o => o.value === workspaceId);
+        let exists = false;
+        if (workspaceListed) {
+            const json = await trpcCall('project.getUserProjects', workspaceId ? { workspaceId } : undefined, 'GET');
+            const projects = (extractTrpcData(json) || {}).projects || [];
+            exists = projects.some(p => p.id === link.projectId);
+        }
+        if (!exists) {
+            await forgetGroupLink(key);
+            showGroupLinkChipMessage('That project is no longer available');
+            return;
+        }
+
+        if (sharedWorkspace.value !== workspaceId) {
+            sharedWorkspace.value = workspaceId;
+            if (workspaceId) chrome.storage.local.set({ SELECTED_WORKSPACE_ID: workspaceId });
+            updateNewProjectHelp();
+        }
+        // A goal filter could hide the project; the load below clears it.
+        chrome.storage.local.remove('SELECTED_GOAL_ID');
+        await loadSharedGoalsAndProjects(workspaceId, { projectId: link.projectId });
+        if (sharedProject.value === link.projectId) {
+            sharedProject.dispatchEvent(new Event('change'));
+        }
+        updateGroupLinkChip();
+    } catch (error) {
+        console.warn('Could not switch to the linked project:', error.message);
+        showGroupLinkChipMessage("Couldn't check that project. Try again.");
+    }
+}
+
+// --- "New project…" in the project picker ---
+
+function updateNewProjectHelp() {
+    if (!newProjectHelp) return;
+    const workspace = sharedWorkspace && sharedWorkspace.value ? sharedWorkspace.selectedOptions[0] : null;
+    if (newProjectRestricted && newProjectRestricted.checked) {
+        newProjectHelp.textContent = 'Visible only to you and people you add';
+    } else {
+        newProjectHelp.textContent = workspace ? `Visible to everyone in ${workspace.textContent}` : '';
+    }
+}
+
+function setNewProjectStatus(text, kind) {
+    if (!newProjectStatus) return;
+    newProjectStatus.textContent = text;
+    newProjectStatus.className = kind ? `save-page-status ${kind}` : 'save-page-status';
+}
+
+// Opens the create row under the project picker, with the name prefilled.
+function openNewProjectRow(prefillName) {
+    if (!newProjectRow) return;
+    if (sharedProjectSelector) sharedProjectSelector.open = true;
+    newProjectName.value = prefillName || '';
+    newProjectRestricted.checked = false;
+    setNewProjectStatus('');
+    updateNewProjectHelp();
+    newProjectRow.hidden = false;
+    newProjectName.focus();
+    newProjectName.select();
+}
+
+// Inside a titled tab group the group's title is the likely project name.
+async function openNewProjectRowForActiveTab() {
+    let title = '';
+    try {
+        const group = await getActiveTabGroup();
+        title = group ? group.title : '';
+    } catch (_) {}
+    openNewProjectRow(title);
+}
+
+function closeNewProjectRow() {
+    if (!newProjectRow) return;
+    newProjectRow.hidden = true;
+    newProjectName.value = '';
+    setNewProjectStatus('');
+}
+
+async function createNewProject() {
+    const workspaceId = sharedWorkspace ? sharedWorkspace.value : '';
+    if (!workspaceId) {
+        setNewProjectStatus('Select a workspace first', 'error');
+        return;
+    }
+    const name = newProjectName.value.trim();
+    if (!name) {
+        setNewProjectStatus('Enter a project name', 'error');
+        newProjectName.focus();
+        return;
+    }
+    newProjectCreate.disabled = true;
+    newProjectCreate.textContent = 'Creating...';
+    setNewProjectStatus('');
+    try {
+        const response = await authenticatedFetch(`${apiBaseURL}/api/trpc/project.create`, {
+            method: 'POST',
+            body: JSON.stringify({
+                json: {
+                    name,
+                    status: 'ACTIVE',
+                    priority: 'NONE',
+                    workspaceId,
+                    isRestricted: newProjectRestricted.checked,
+                },
+            }),
+        });
+        if (!response.ok) {
+            throw new Error(await readTrpcErrorMessage(response, 'Failed to create project'));
+        }
+        const project = extractTrpcData(await response.json());
+        if (!project || !project.id) throw new Error('Failed to create project');
+
+        // Only if the picker still shows the workspace the project went into.
+        if (sharedWorkspace.value === workspaceId) {
+            sharedProjectsCache.push({ id: project.id, name: project.name || name, slug: project.slug });
+            // A goal filter would hide a project that belongs to no goal yet.
+            if (sharedGoal && sharedGoal.value) {
+                sharedGoal.value = '';
+                chrome.storage.local.remove('SELECTED_GOAL_ID');
+            }
+            renderSharedProjects(project.id);
+            // The picker's own handler persists the selection.
+            sharedProject.dispatchEvent(new Event('change'));
+        }
+        closeNewProjectRow();
+    } catch (error) {
+        console.error('Error creating project:', error);
+        setNewProjectStatus(error.message || 'Network error', 'error');
+    } finally {
+        newProjectCreate.disabled = false;
+        newProjectCreate.textContent = 'Create';
+    }
+}
+
 // --- Initialize ---
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -2916,7 +3979,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Tab switching
     if (tabSavePageBtn) {
-        tabSavePageBtn.addEventListener('click', () => switchTab(tabSavePageBtn, panelSavePage));
+        tabSavePageBtn.addEventListener('click', () => {
+            switchTab(tabSavePageBtn, panelSavePage);
+            updateResourceStatus();
+            loadProjectResources();
+        });
     }
     if (tabCreateActionBtn) {
         tabCreateActionBtn.addEventListener('click', () => switchTab(tabCreateActionBtn, panelCreateAction));
@@ -2969,18 +4036,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Reconcile on panel open: getActive from server, restore display state
     reconcileActiveTimer();
 
-    // Save Page: Cmd/Ctrl+Enter submits from the context or description field
+    // Resources: Cmd/Ctrl+Enter in the note or description field presses Save
     [savePageContext, savePageDesc].forEach((field) => {
-        if (!field || !savePageBtn) return;
+        if (!field || !resourceSaveBtn) return;
         field.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
-                savePageBtn.click();
+                resourceSaveBtn.click();
             }
         });
     });
 
-    // Save Page: optional description toggle
+    // Resources: optional description toggle
     if (savePageDescToggle && savePageDesc) {
         savePageDescToggle.addEventListener('change', () => {
             savePageDesc.style.display = savePageDescToggle.checked ? '' : 'none';
@@ -2988,7 +4055,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
-    // Save Page button
+    // "Save as action" link: creates an Action that links to the page
     if (savePageBtn) {
         savePageBtn.addEventListener('click', async () => {
             if (savePageStatus) {
@@ -3072,84 +4139,56 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             setTimeout(() => {
                 savePageBtn.disabled = false;
-                savePageBtn.textContent = 'Save Page';
+                savePageBtn.textContent = 'Save as action';
             }, 2000);
         });
     }
 
-    // Add to Reading List button: saves the page as a Resource in the
-    // Knowledge Base's Reading list, with the article body when we can read it.
-    if (readLaterBtn) {
-        readLaterBtn.addEventListener('click', async () => {
-            const setStatus = (text, kind) => {
-                if (!savePageStatus) return;
-                savePageStatus.textContent = text;
-                savePageStatus.className = kind ? `save-page-status ${kind}` : 'save-page-status';
-            };
-            setStatus('');
-            const tab = await getActiveNormalTab();
-            if (!tab || !/^https?:/.test(tab.url || '')) {
-                setStatus('Only web pages can be added to the Reading list', 'error');
-                return;
-            }
-            readLaterBtn.disabled = true;
-            readLaterBtn.textContent = 'Saving...';
-            try {
-                const article = await extractArticle(tab.id);
-                const body = article && article.content && article.content.length <= MAX_ARTICLE_HTML_CHARS
-                    ? article.content
-                    : undefined;
-                const context = savePageContext ? savePageContext.value.trim() : '';
-                const userDescription = (savePageDescToggle && savePageDescToggle.checked && savePageDesc)
-                    ? savePageDesc.value.trim()
-                    : '';
-                const input = {
-                    title: tab.title || (article && article.title) || tab.url,
-                    url: tab.url,
-                    contentType: body ? 'web_page' : 'bookmark',
-                    readStatus: 'to_read',
-                    // Capturing the body doesn't imply indexing it (ADR-0072).
-                    generateEmbeddings: false,
-                };
-                const description = userDescription || context || (article && article.excerpt);
-                if (description) input.description = description;
-                if (body) input.rawContent = body;
-                if (article && article.byline) input.author = article.byline;
-                if (article && article.publishedTime && !isNaN(Date.parse(article.publishedTime))) {
-                    input.publishedAt = new Date(article.publishedTime).toISOString();
-                }
-                // Workspace only: the Reading list is filtered by workspace, and
-                // a projectId would need edit access and re-file existing rows.
-                const workspaceId = sharedWorkspace ? sharedWorkspace.value : '';
-                if (workspaceId) input.workspaceId = workspaceId;
+    // Resources tab: Save, the tab-group save, and the listeners that keep the
+    // status line current. None of it exists without the Resources tab.
+    if (hasSavePage) {
+        if (resourceSaveBtn) resourceSaveBtn.addEventListener('click', handleResourceSave);
+        if (resourceQueueToggle) resourceQueueToggle.addEventListener('change', renderResourceStatus);
+        if (resourceSaveGroupBtn) resourceSaveGroupBtn.addEventListener('click', openGroupChecklist);
 
-                const response = await authenticatedFetch(`${apiBaseURL}/api/trpc/resource.create`, {
-                    method: 'POST',
-                    body: JSON.stringify({ json: input })
-                });
-                if (!response.ok) {
-                    throw new Error(await readTrpcErrorMessage(response, 'Failed to add to Reading list'));
-                }
-                const result = await response.json();
-                const created = result?.result?.data?.json?.created;
-                addRecentItem('savePage', {
-                    name: `Reading list: ${tab.title || tab.url}`,
-                    url: getReadingListUrl(),
-                });
-                readLaterBtn.textContent = 'Added!';
-                const note = created === false ? 'Already saved, moved back to Reading list' : 'Added to Reading list';
-                setStatus(body ? note : `${note} (link only, no article text)`, 'success');
-                if (savePageContext) savePageContext.value = '';
-                if (savePageDesc) savePageDesc.value = '';
-            } catch (error) {
-                console.error('Error adding to Reading list:', error);
-                readLaterBtn.textContent = 'Save Failed';
-                setStatus(error.message || 'Network error', 'error');
+        chrome.tabs.onActivated.addListener(() => {
+            updateResourceStatus();
+            refreshGroupSaveButton();
+            updateGroupLinkChip();
+        });
+        chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+            if (changeInfo.groupId !== undefined) {
+                refreshGroupSaveButton();
+                updateGroupLinkChip();
             }
-            setTimeout(() => {
-                readLaterBtn.disabled = false;
-                readLaterBtn.textContent = 'Add to Reading List';
-            }, 2000);
+            if (tab.active && (changeInfo.url || changeInfo.status === 'complete')) {
+                updateResourceStatus();
+            }
+        });
+        chrome.tabs.onRemoved.addListener(() => refreshGroupSaveButton());
+        chrome.windows.onFocusChanged.addListener(() => updateResourceStatus());
+        // Tradescape has no tabGroups permission, so the namespace is absent there.
+        if (chrome.tabGroups) {
+            chrome.tabGroups.onUpdated.addListener(() => {
+                refreshGroupSaveButton();
+                updateGroupLinkChip();
+            });
+        }
+    }
+
+    // "New project…" row
+    if (newProjectCreate) newProjectCreate.addEventListener('click', createNewProject);
+    if (newProjectCancel) newProjectCancel.addEventListener('click', closeNewProjectRow);
+    if (newProjectRestricted) newProjectRestricted.addEventListener('change', updateNewProjectHelp);
+    if (newProjectName) {
+        newProjectName.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                createNewProject();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                closeNewProjectRow();
+            }
         });
     }
 
@@ -3373,5 +4412,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (isConfigured) {
         await initEngine();
         if (hasProjects) populateSharedDropdowns();
+        if (hasSavePage) {
+            syncResourceProjectUi();
+            refreshResourceIdentities();
+            refreshGroupSaveButton();
+            updateGroupLinkChip();
+        }
     }
 });

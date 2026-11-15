@@ -2084,8 +2084,41 @@
     }
   });
 
+  // shared/page-text.js
+  var require_page_text = __commonJS({
+    "shared/page-text.js"(exports, module) {
+      (function() {
+        const MAX_PAGE_TEXT_CHARS = 1e5;
+        const MIN_PAGE_TEXT_CHARS = 200;
+        const MAX_LINE_REPEATS = 3;
+        function cleanPageText(rawText) {
+          const seen = /* @__PURE__ */ new Map();
+          const lines = [];
+          let previous = null;
+          for (const rawLine of String(rawText || "").split("\n")) {
+            const line = rawLine.trim();
+            if (!line) continue;
+            const isRepeatOfPrevious = line === previous;
+            previous = line;
+            if (isRepeatOfPrevious) continue;
+            const count = seen.get(line) || 0;
+            if (count >= MAX_LINE_REPEATS) continue;
+            seen.set(line, count + 1);
+            lines.push(line);
+          }
+          const text = lines.join("\n").slice(0, MAX_PAGE_TEXT_CHARS);
+          return text.length < MIN_PAGE_TEXT_CHARS ? void 0 : text;
+        }
+        const api = { cleanPageText, MAX_PAGE_TEXT_CHARS, MIN_PAGE_TEXT_CHARS, MAX_LINE_REPEATS };
+        if (typeof module !== "undefined" && module.exports) module.exports = api;
+        else globalThis.ExpoPageText = api;
+      })();
+    }
+  });
+
   // shared/readability-extract.js
   var import_readability = __toESM(require_readability());
+  var import_page_text = __toESM(require_page_text());
   globalThis.__expoExtractArticle = function() {
     const meta = (selector) => document.querySelector(selector)?.getAttribute("content") || void 0;
     let article = null;
@@ -2094,10 +2127,19 @@
     } catch (e) {
       console.warn("[Exponential] Readability failed:", e);
     }
+    const readerable = (0, import_readability.isProbablyReaderable)(document);
+    const content = article?.content || void 0;
     return {
-      readerable: (0, import_readability.isProbablyReaderable)(document),
+      readerable,
       title: article?.title || document.title || void 0,
-      content: article?.content || void 0,
+      content,
+      // Only for a page that is not an article; the side panel sends a body
+      // or Page text, never both.
+      pageText: !readerable || !content ? import_page_text.default.cleanPageText(document.body?.innerText) : void 0,
+      // The URL the page declares for itself. The server uses it to match
+      // the page against Resources already saved, and only when it names
+      // the same host and path as the address visited.
+      declaredUrl: document.querySelector('link[rel="canonical"]')?.href || meta('meta[property="og:url"]') || void 0,
       excerpt: article?.excerpt || meta('meta[name="description"]') || void 0,
       byline: article?.byline || meta('meta[name="author"]') || void 0,
       publishedTime: article?.publishedTime || meta('meta[property="article:published_time"]') || void 0

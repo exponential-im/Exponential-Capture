@@ -452,15 +452,225 @@
       .btn-save-page:hover {
         background: var(--color-primary-hover);
       }
-      .btn-read-later {
-        margin-top: var(--space-sm);
+      /* Resources tab */
+      [hidden] {
+        display: none !important;
+      }
+      /* Secondary action as a text link ("Save as action") */
+      .btn-link {
+        width: auto;
+        margin: 0 0 var(--space-sm);
+        padding: 0;
+        background: none;
+        border: none;
+        color: var(--color-primary-text);
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        text-decoration: underline;
+        text-underline-offset: 2px;
+      }
+      .btn-link:hover {
+        color: var(--color-primary);
+      }
+      .btn-link:disabled {
+        background: none !important;
+        border-color: transparent !important;
+      }
+      /* Small outlined button used inside status lines, chips and rows */
+      .btn-inline {
+        width: auto;
+        margin: 0;
+        padding: 3px 10px;
+        flex-shrink: 0;
+        background: var(--surface);
+        color: var(--color-primary-text);
+        border: 1px solid var(--border-strong);
+        font-size: var(--font-size-xs);
+      }
+      .btn-inline:hover {
+        background: var(--color-primary-soft);
+        border-color: var(--color-primary);
+      }
+      .btn-inline.btn-inline-primary {
+        background: var(--color-primary);
+        border-color: transparent;
+        color: white;
+      }
+      .btn-inline.btn-inline-primary:hover {
+        background: var(--color-primary-hover);
+      }
+      .resource-status {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: var(--space-xs);
+        min-height: 18px;
+        margin-bottom: var(--space-sm);
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        color: var(--text-muted);
+      }
+      .resource-status.saved {
+        color: var(--color-success);
+      }
+      .resource-status-hint {
+        flex-basis: 100%;
+        font-weight: var(--font-weight-normal);
+        color: var(--text-muted);
+      }
+      .resource-visibility {
+        margin-bottom: var(--space-xs);
+        font-size: var(--font-size-xs);
+        color: var(--text-muted);
+      }
+      .btn-save-group {
         background: var(--surface);
         color: var(--color-primary-text);
         border: 1px solid var(--border-strong);
       }
-      .btn-read-later:hover {
+      .btn-save-group:hover {
         background: var(--color-primary-soft);
         border-color: var(--color-primary);
+      }
+      .resource-group-panel {
+        margin-bottom: var(--space-sm);
+        padding: var(--space-sm);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        background: var(--surface);
+      }
+      .resource-group-list {
+        max-height: 240px;
+        overflow-y: auto;
+        margin-bottom: var(--space-xs);
+      }
+      .resource-group-row {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--space-xs);
+        padding: 6px 0;
+        border-bottom: 1px solid var(--border);
+        font-size: var(--font-size-sm);
+        color: var(--text-2);
+        cursor: pointer;
+      }
+      .resource-group-row:last-child {
+        border-bottom: none;
+      }
+      .resource-group-row.is-disabled {
+        cursor: default;
+        color: var(--text-subtle);
+      }
+      .resource-group-row input {
+        margin: 3px 0 0;
+        flex-shrink: 0;
+        accent-color: var(--color-primary);
+      }
+      .resource-group-row-text {
+        flex: 1;
+        min-width: 0;
+      }
+      .resource-group-row-title,
+      .resource-group-row-host {
+        display: block;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .resource-group-row-host,
+      .resource-group-row-outcome,
+      .resource-group-note {
+        font-size: var(--font-size-xs);
+        color: var(--text-muted);
+      }
+      .resource-group-row-outcome {
+        flex-shrink: 0;
+        max-width: 45%;
+        text-align: right;
+      }
+      .resource-group-row-outcome.success { color: var(--color-success); }
+      .resource-group-row-outcome.error { color: var(--color-error-text); }
+      .resource-group-note {
+        min-height: 16px;
+        margin-bottom: var(--space-xs);
+      }
+      .resource-group-note.error {
+        color: var(--color-error-text);
+      }
+      .button-row {
+        display: flex;
+        gap: var(--space-xs);
+      }
+      .button-row button {
+        margin-bottom: 0;
+      }
+      .btn-cancel {
+        flex: 0 0 auto;
+        width: auto;
+        background: var(--surface);
+        color: var(--text-2);
+        border: 1px solid var(--border-strong);
+      }
+      .btn-cancel:hover {
+        background: var(--surface-2);
+      }
+      .project-resource-meta {
+        flex-shrink: 0;
+        max-width: 50%;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: var(--font-size-xs);
+        color: var(--text-subtle);
+      }
+      .project-resources-empty {
+        padding: var(--space-xs) 0;
+        font-size: var(--font-size-sm);
+        color: var(--text-muted);
+      }
+      /* Suggestion shown on every tab when the browser tab group is linked to a project */
+      .group-link-chip {
+        display: flex;
+        align-items: center;
+        gap: var(--space-xs);
+        margin-bottom: var(--space-sm);
+        padding: var(--space-xs) var(--space-sm);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        background: var(--color-primary-soft);
+        font-size: var(--font-size-sm);
+        color: var(--text-2);
+      }
+      .group-link-chip-text {
+        flex: 1;
+        min-width: 0;
+      }
+      .group-link-chip-dismiss {
+        width: auto;
+        margin: 0;
+        padding: 0 4px;
+        flex-shrink: 0;
+        background: none;
+        border: none;
+        color: var(--text-muted);
+        font-size: var(--font-size-lg);
+        line-height: 1;
+      }
+      .group-link-chip-dismiss:hover {
+        color: var(--text);
+      }
+      /* Inline "New project…" row under the project picker */
+      .new-project-row {
+        margin-bottom: var(--space-xs);
+        padding: var(--space-sm);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        background: var(--surface);
+      }
+      .new-project-help {
+        margin-bottom: var(--space-xs);
+        font-size: var(--font-size-xs);
+        color: var(--text-muted);
       }
       .save-page-toggle {
         display: flex;
@@ -1537,12 +1747,28 @@
         <select class="shared-select" id="sharedProject">
           <option value="">Select project...</option>
         </select>
+        <div class="new-project-row" id="newProjectRow" hidden>
+          <input type="text" class="shared-select" id="newProjectName" placeholder="Project name" autocomplete="off">
+          <label class="save-page-toggle">
+            <input type="checkbox" id="newProjectRestricted">
+            Restricted
+          </label>
+          <div class="new-project-help" id="newProjectHelp"></div>
+          <div class="button-row">
+            <button class="btn-save-page" id="newProjectCreate">Create</button>
+            <button class="btn-cancel" id="newProjectCancel">Cancel</button>
+          </div>
+          <div class="save-page-status" id="newProjectStatus"></div>
+        </div>
       </div>
     </details>
 
+    <!-- Suggests the project a browser tab group was last saved into; never switches on its own -->
+    <div class="group-link-chip" id="groupLinkChip" hidden></div>
+
     <!-- Panel-level tabs (conditionally shown by JS based on hasSavePage config) -->
     <div class="panel-tabs" id="panelTabs">
-      <button id="tabSavePage" class="active" title="Save Page" aria-label="Save Page">
+      <button id="tabSavePage" class="active" title="Resources" aria-label="Resources">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
       </button>
       <button id="tabCreateAction" title="Create Action" aria-label="Create Action">
@@ -1559,17 +1785,33 @@
       </button>
     </div>
 
-    <!-- Tab 1: Save Page -->
+    <!-- Tab 1: Resources -->
     <div class="tab-panel active" id="panelSavePage">
-      <input type="text" class="save-page-input" id="savePageContext" placeholder="Add context (optional)...">
+      <div class="resource-status" id="resourceStatus"></div>
+      <input type="text" class="save-page-input" id="savePageContext" placeholder="Add a note (optional)...">
       <label class="save-page-toggle">
         <input type="checkbox" id="savePageDescToggle">
         Add description
       </label>
       <textarea class="save-page-input create-action-desc" id="savePageDesc" placeholder="Description..." rows="3" style="display:none;"></textarea>
-      <button class="btn-save-page" id="savePageBtn">Save Page</button>
-      <button class="btn-read-later" id="readLaterBtn" title="Add this page to your Reading list in the Knowledge Base">Add to Reading List</button>
+      <div class="resource-visibility" id="resourceVisibility"></div>
+      <button class="btn-save-page" id="resourceSaveBtn">Save</button>
+      <label class="save-page-toggle" title="Also queue this page in your Reading list">
+        <input type="checkbox" id="resourceQueueToggle">
+        Add to Reading list
+      </label>
+      <label class="save-page-toggle" title="Index the page so search and Zoe can find it">
+        <input type="checkbox" id="resourceIndexToggle">
+        Add to knowledge
+      </label>
+      <button class="btn-link" id="savePageBtn">Save as action</button>
+      <button class="btn-save-group" id="resourceSaveGroupBtn" hidden></button>
+      <div class="resource-group-panel" id="resourceGroupPanel" hidden></div>
       <div class="save-page-status" id="savePageStatus"></div>
+      <div class="recent-items" id="projectResources" style="display:none;">
+        <div class="recent-items-header">In this project</div>
+        <div class="recent-items-list" id="projectResourcesList"></div>
+      </div>
       <div class="recent-items" id="recentSavePage" style="display:none;">
         <div class="recent-items-header">Recent Saved Pages</div>
         <div class="recent-items-list" id="recentSavePageList"></div>
