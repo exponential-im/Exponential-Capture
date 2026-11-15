@@ -4,7 +4,8 @@
   "private": true,
   "description": "Exponential and Tradescape Chrome extensions with local Whisper speech recognition",
   "scripts": {
-    "build": "bash build.sh"
+    "build": "bash build.sh",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.4.0",
