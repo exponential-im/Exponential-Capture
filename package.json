@@ -13,5 +13,10 @@
   },
   "devDependencies": {
     "esbuild": "^0.24.0"
+  },
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/exponential-im/alpha-chrome-plugin.git"
   }
 }
