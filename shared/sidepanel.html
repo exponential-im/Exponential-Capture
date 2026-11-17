@@ -1625,6 +1625,87 @@
         background: var(--surface-3);
         color: var(--text);
       }
+      /* Track Time: the "What's this for?" picker */
+      .timer-target {
+        margin-bottom: var(--space-sm);
+      }
+      .timer-target-wrap {
+        position: relative;
+      }
+      .timer-target-wrap .save-page-input {
+        margin-bottom: 0;
+        padding-right: calc(var(--space-lg) + var(--space-sm));
+      }
+      .timer-target-clear {
+        position: absolute;
+        top: 50%;
+        right: var(--space-xs);
+        transform: translateY(-50%);
+        width: auto;
+        margin: 0;
+        background: none;
+        border: none;
+        color: var(--text-muted);
+        font-size: var(--font-size-lg);
+        font-weight: var(--font-weight-normal);
+        line-height: 1;
+        cursor: pointer;
+        padding: 4px 6px;
+      }
+      .timer-target-clear:hover {
+        color: var(--text);
+      }
+      .timer-target-list li.timer-target-header {
+        padding: var(--space-xs) var(--space-sm) 2px;
+        font-size: var(--font-size-xs);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--text-muted);
+        cursor: default;
+        background: none;
+      }
+      .timer-target-list li.timer-target-option {
+        padding: var(--space-xs) var(--space-sm);
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+      }
+      .timer-target-option-label {
+        color: var(--text-muted);
+        margin-right: 6px;
+        font-variant-numeric: tabular-nums;
+      }
+      .timer-target-option-context {
+        display: block;
+        font-size: var(--font-size-xs);
+        color: var(--text-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .timer-target-list li.timer-target-empty {
+        padding: var(--space-xs) var(--space-sm);
+        font-size: var(--font-size-sm);
+        color: var(--text-muted);
+        cursor: default;
+      }
+      .timer-target-context {
+        margin-top: 4px;
+        font-size: var(--font-size-xs);
+        color: var(--text-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      /* On the Track Time tab the picker replaces the shared Goal and Project
+         selects; only the Workspace select stays. */
+      .shared-project-selector.timer-mode .searchable-select:has(#sharedGoal),
+      .shared-project-selector.timer-mode .searchable-select:has(#sharedProject),
+      .shared-project-selector.timer-mode #sharedGoal,
+      .shared-project-selector.timer-mode #sharedProject,
+      .shared-project-selector.timer-mode #newProjectRow {
+        display: none !important;
+      }
       /* Searchable select (text input + filtered list layered over a native <select>) */
       .searchable-select {
         position: relative;
@@ -1875,6 +1956,17 @@
 
     <!-- Tab: Track Time -->
     <div class="tab-panel" id="panelTrackTime">
+      <!-- "What's this for?": one pick, a Ticket or a Project. Feature, Cycle
+           and Goal are derived on the server and shown read-only below. -->
+      <div class="timer-target">
+        <div class="track-time-autocomplete-wrap timer-target-wrap">
+          <input type="text" class="save-page-input" id="trackTimeTargetInput" placeholder="What's this for? Ticket or project" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="trackTimeTargetList" aria-autocomplete="list">
+          <button type="button" class="timer-target-clear" id="trackTimeTargetClear" aria-label="Clear ticket or project" title="Clear" hidden>×</button>
+          <ul id="trackTimeTargetList" class="track-time-suggestions timer-target-list" role="listbox"></ul>
+        </div>
+        <div class="timer-target-context" id="trackTimeTargetContext" hidden></div>
+        <button type="button" class="btn-link timer-target-pr" id="trackTimeTargetFindPr" hidden>Find this PR's ticket</button>
+      </div>
       <div class="track-time-autocomplete-wrap" style="position:relative;">
         <input type="text" class="save-page-input" id="trackTimeTitle" placeholder="What are you working on?" autocomplete="off">
         <ul id="trackTimeSuggestions" class="track-time-suggestions" role="listbox"></ul>
@@ -1966,6 +2058,7 @@
     <script src="config.js"></script>
     <script src="speech-engine-whisper.js"></script>
     <script src="page-identity.js"></script>
+    <script src="timer-target.js"></script>
     <script src="sidepanel.js"></script>
   </body>
 </html>
