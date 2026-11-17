@@ -100,6 +100,11 @@ const trackTimeActionName = document.getElementById('trackTimeActionName');
 const trackTimeElapsed = document.getElementById('trackTimeElapsed');
 const trackTimeStatus = document.getElementById('trackTimeStatus');
 const trackTimeSuggestions = document.getElementById('trackTimeSuggestions');
+const trackTimeTargetInput = document.getElementById('trackTimeTargetInput');
+const trackTimeTargetList = document.getElementById('trackTimeTargetList');
+const trackTimeTargetClear = document.getElementById('trackTimeTargetClear');
+const trackTimeTargetContext = document.getElementById('trackTimeTargetContext');
+const trackTimeTargetFindPr = document.getElementById('trackTimeTargetFindPr');
 
 // Time Entries (history, shown under Track Time)
 const timeEntriesList = document.getElementById('timeEntriesList');
@@ -526,6 +531,8 @@ async function loadSharedGoalsAndProjects(workspaceId, { goalId, projectId } = {
     sharedProjectsCache = projects || [];
     renderSharedGoals(goalId);
     renderSharedProjects(projectId);
+    // The timer picker may have opened before this list arrived.
+    syncTimerTargetToSharedProject();
 }
 
 async function populateSharedDropdowns() {
@@ -897,6 +904,9 @@ if (sharedWorkspace) {
         chrome.storage.local.remove('SELECTED_GOAL_ID');
         updateNewProjectHelp();
         await loadSharedGoalsAndProjects(workspaceId);
+        // A pick from the previous workspace doesn't carry over.
+        timerTargetSource = null;
+        refreshTimerTargetFromTab();
     });
 }
 
@@ -2598,30 +2608,306 @@ function onTrackTimeInputChanged() {
     trackTimeSearchTimer = setTimeout(() => { searchTrackTimeSuggestions(value); }, TRACK_TIME_SEARCH_DEBOUNCE_MS);
 }
 
+// ── Track Time: the "What's this for?" picker ───────────────────────────
+// One pick, a Ticket or a Project (exponential-app: "Log timer time against
+// Tickets"). It replaces the shared Goal and Project selects on this tab;
+// the shared Workspace select stays and scopes the search.
+
+const TIMER_TARGET_SEARCH_DEBOUNCE_MS = 150;
+// The chosen TimerTarget ({ kind, id, title, label, context, workspace, … }).
+let timerTarget = null;
+// Where it came from: 'user' (picked by hand, sticks), 'tab' (the page in
+// front of you), 'project' (the shared project), or null.
+let timerTargetSource = null;
+let timerTargetOptions = [];
+let timerTargetActiveIndex = -1;
+let timerTargetSearchTimer = null;
+let timerTargetSearchSeq = 0;
+let timerTargetResolveSeq = 0;
+// A GitHub PR tab the person may ask to look up (never sent unasked, ADR 0001).
+let timerTargetPrUrl = null;
+
+function isTrackTimeTabActive() {
+    return !!(panelTrackTime && panelTrackTime.classList.contains('active'));
+}
+
+async function getSelectedWorkspaceId() {
+    if (sharedWorkspace && sharedWorkspace.value) return sharedWorkspace.value;
+    try {
+        const stored = await chrome.storage.local.get(['SELECTED_WORKSPACE_ID']);
+        return stored.SELECTED_WORKSPACE_ID || null;
+    } catch (_) {
+        return null;
+    }
+}
+
+function renderTimerTarget() {
+    if (!trackTimeTargetInput) return;
+    if (document.activeElement !== trackTimeTargetInput) {
+        trackTimeTargetInput.value = ExpoTimerTarget.targetText(timerTarget);
+    }
+    if (trackTimeTargetClear) trackTimeTargetClear.hidden = !timerTarget;
+    const context = ExpoTimerTarget.targetContext(timerTarget, sharedWorkspace ? sharedWorkspace.value : null);
+    if (trackTimeTargetContext) {
+        trackTimeTargetContext.textContent = context;
+        trackTimeTargetContext.title = context;
+        trackTimeTargetContext.hidden = !context;
+    }
+    if (trackTimeTargetFindPr) trackTimeTargetFindPr.hidden = !timerTargetPrUrl || timerTargetSource === 'user';
+}
+
+function setTimerTarget(target, source) {
+    timerTarget = target || null;
+    timerTargetSource = target ? source : null;
+    renderTimerTarget();
+}
+
+// The shared selector's project, as a target, so the timer starts where the
+// rest of the panel already points.
+function sharedProjectTarget() {
+    const id = sharedProject ? sharedProject.value : '';
+    if (!id || id === NEW_PROJECT_VALUE) return null;
+    const project = sharedProjectsCache.find((p) => p.id === id);
+    const wsOption = sharedWorkspace ? sharedWorkspace.selectedOptions[0] : null;
+    return ExpoTimerTarget.projectTarget(project, {
+        id: sharedWorkspace ? sharedWorkspace.value : null,
+        slug: wsOption ? wsOption.textContent : '',
+    });
+}
+
+// Once the shared project list has loaded, a picker still showing nothing (or
+// the shared project) takes the shared project. A pick by hand or a target
+// from the tab is left alone.
+function syncTimerTargetToSharedProject() {
+    if (!trackTimeTargetInput) return;
+    if (timerTargetSource !== null && timerTargetSource !== 'project') return;
+    if (timerTargetSource === null && timerTarget) return;
+    setTimerTarget(sharedProjectTarget(), 'project');
+}
+
+async function resolveTimerTarget(url) {
+    try {
+        const json = await trpcCall('timeEntry.resolveTarget', { url }, 'GET');
+        return extractTrpcData(json) || null;
+    } catch (_) {
+        // Best-effort: an older server has no resolveTarget.
+        return null;
+    }
+}
+
+// Follow the tab in front of you, unless the person picked a target by hand.
+// Only an Exponential ticket or project page is looked up on its own; a
+// GitHub PR offers a button; any other page never leaves the browser.
+async function refreshTimerTargetFromTab() {
+    if (!trackTimeTargetInput || !isTrackTimeTabActive()) return;
+    if (!ExpoTimerTarget.tabMayReplace(timerTargetSource)) return;
+    const seq = ++timerTargetResolveSeq;
+    let tab = null;
+    try {
+        tab = await getActiveNormalTab();
+    } catch (_) {
+        tab = null;
+    }
+    const url = tab && tab.url ? tab.url : '';
+    const lookup = url ? ExpoTimerTarget.tabLookup(url, apiBaseURL) : null;
+    const resolved = lookup === 'app' ? await resolveTimerTarget(url) : null;
+    if (seq !== timerTargetResolveSeq || !ExpoTimerTarget.tabMayReplace(timerTargetSource)) return;
+    timerTargetPrUrl = lookup === 'pullRequest' ? url : null;
+    if (resolved) {
+        setTimerTarget(resolved, 'tab');
+    } else {
+        setTimerTarget(sharedProjectTarget(), 'project');
+    }
+}
+
+async function findTimerTargetForPr() {
+    if (!timerTargetPrUrl || !trackTimeTargetFindPr) return;
+    const url = timerTargetPrUrl;
+    // A pick by hand (or another lookup) while this one is in flight wins.
+    const seq = ++timerTargetResolveSeq;
+    trackTimeTargetFindPr.disabled = true;
+    const resolved = await resolveTimerTarget(url);
+    trackTimeTargetFindPr.disabled = false;
+    if (seq !== timerTargetResolveSeq || timerTargetPrUrl !== url) return;
+    if (resolved) {
+        timerTargetPrUrl = null;
+        setTimerTarget(resolved, 'tab');
+        setTrackTimeStatus('', '');
+    } else {
+        setTrackTimeStatus('No ticket has this PR linked.', '');
+    }
+}
+
+function hideTimerTargetList() {
+    if (!trackTimeTargetList) return;
+    trackTimeTargetList.style.display = 'none';
+    trackTimeTargetList.innerHTML = '';
+    timerTargetOptions = [];
+    timerTargetActiveIndex = -1;
+    if (trackTimeTargetInput) trackTimeTargetInput.setAttribute('aria-expanded', 'false');
+}
+
+function highlightTimerTargetOption() {
+    if (!trackTimeTargetList) return;
+    trackTimeTargetList.querySelectorAll('li.timer-target-option').forEach((li, i) => {
+        li.setAttribute('aria-selected', i === timerTargetActiveIndex ? 'true' : 'false');
+        if (i === timerTargetActiveIndex) li.scrollIntoView({ block: 'nearest' });
+    });
+}
+
+function chooseTimerTarget(target) {
+    // Supersede any tab or PR lookup still in flight.
+    timerTargetResolveSeq++;
+    timerTargetPrUrl = null;
+    setTimerTarget(target, 'user');
+    hideTimerTargetList();
+    if (trackTimeTargetInput) {
+        trackTimeTargetInput.value = ExpoTimerTarget.targetText(target);
+        trackTimeTargetInput.blur();
+    }
+}
+
+function renderTimerTargetList(result, query) {
+    if (!trackTimeTargetList) return;
+    trackTimeTargetList.innerHTML = '';
+    timerTargetOptions = [];
+    timerTargetActiveIndex = -1;
+    const rows = ExpoTimerTarget.pickerRows(result);
+    if (rows.length === 0) {
+        const li = document.createElement('li');
+        li.className = 'timer-target-empty';
+        li.textContent = query ? 'No tickets or projects match' : 'Type to find a ticket or project';
+        trackTimeTargetList.appendChild(li);
+    }
+    rows.forEach((row) => {
+        const li = document.createElement('li');
+        if (row.type === 'header') {
+            li.className = 'timer-target-header';
+            li.setAttribute('role', 'presentation');
+            li.textContent = row.text;
+        } else {
+            const target = row.target;
+            li.className = 'timer-target-option';
+            li.setAttribute('role', 'option');
+            if (target.label) {
+                const label = document.createElement('span');
+                label.className = 'timer-target-option-label';
+                label.textContent = target.label;
+                li.appendChild(label);
+            }
+            li.appendChild(document.createTextNode(target.title));
+            if (target.context) {
+                const context = document.createElement('span');
+                context.className = 'timer-target-option-context';
+                context.textContent = target.context;
+                li.appendChild(context);
+            }
+            li.title = ExpoTimerTarget.targetText(target);
+            li.addEventListener('mousedown', (e) => {
+                // mousedown so the choice lands before the input's blur closes the list
+                e.preventDefault();
+                chooseTimerTarget(target);
+            });
+            timerTargetOptions.push(target);
+        }
+        trackTimeTargetList.appendChild(li);
+    });
+    trackTimeTargetList.style.display = 'block';
+    if (trackTimeTargetInput) trackTimeTargetInput.setAttribute('aria-expanded', 'true');
+}
+
+async function searchTimerTargets(query) {
+    const seq = ++timerTargetSearchSeq;
+    const workspaceId = await getSelectedWorkspaceId();
+    if (!workspaceId) {
+        if (seq === timerTargetSearchSeq) renderTimerTargetList(null, query || 'x');
+        return;
+    }
+    try {
+        const payload = { workspaceId, limit: 8 };
+        if (query) payload.query = query;
+        const json = await trpcCall('timeEntry.searchTargets', payload, 'GET');
+        // Only the latest request may render, and only while the input has focus.
+        if (seq !== timerTargetSearchSeq || document.activeElement !== trackTimeTargetInput) return;
+        renderTimerTargetList(extractTrpcData(json), query);
+    } catch (_) {
+        if (seq === timerTargetSearchSeq) hideTimerTargetList();
+    }
+}
+
+function onTimerTargetInput() {
+    const value = trackTimeTargetInput ? trackTimeTargetInput.value.trim() : '';
+    if (timerTargetSearchTimer) clearTimeout(timerTargetSearchTimer);
+    timerTargetSearchTimer = setTimeout(() => { searchTimerTargets(value); }, TIMER_TARGET_SEARCH_DEBOUNCE_MS);
+}
+
+function onTimerTargetKeydown(e) {
+    const open = trackTimeTargetList && trackTimeTargetList.style.display === 'block';
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        if (!open || timerTargetOptions.length === 0) return;
+        e.preventDefault();
+        const step = e.key === 'ArrowDown' ? 1 : -1;
+        const n = timerTargetOptions.length;
+        timerTargetActiveIndex = (timerTargetActiveIndex + step + n) % n;
+        highlightTimerTargetOption();
+    } else if (e.key === 'Enter') {
+        if (open && timerTargetActiveIndex >= 0) {
+            e.preventDefault();
+            chooseTimerTarget(timerTargetOptions[timerTargetActiveIndex]);
+        } else if (open && timerTargetOptions.length > 0) {
+            e.preventDefault();
+            chooseTimerTarget(timerTargetOptions[0]);
+        }
+    } else if (e.key === 'Escape') {
+        hideTimerTargetList();
+        trackTimeTargetInput.blur();
+    }
+}
+
+function wireTimerTargetPicker() {
+    if (!trackTimeTargetInput) return;
+    trackTimeTargetInput.addEventListener('focus', () => {
+        // Search from scratch; an empty query lists the suggestions.
+        trackTimeTargetInput.value = '';
+        trackTimeTargetInput.placeholder = ExpoTimerTarget.targetText(timerTarget) || "What's this for? Ticket or project";
+        searchTimerTargets('');
+    });
+    trackTimeTargetInput.addEventListener('blur', () => {
+        hideTimerTargetList();
+        trackTimeTargetInput.placeholder = "What's this for? Ticket or project";
+        renderTimerTarget();
+    });
+    trackTimeTargetInput.addEventListener('input', onTimerTargetInput);
+    trackTimeTargetInput.addEventListener('keydown', onTimerTargetKeydown);
+    if (trackTimeTargetClear) {
+        trackTimeTargetClear.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            // Clearing hands the picker back to the tab on the next change.
+            timerTargetResolveSeq++;
+            setTimerTarget(null, null);
+        });
+    }
+    if (trackTimeTargetFindPr) trackTimeTargetFindPr.addEventListener('click', findTimerTargetForPr);
+    chrome.tabs.onActivated.addListener(() => refreshTimerTargetFromTab());
+    chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+        if (tab.active && changeInfo.url) refreshTimerTargetFromTab();
+    });
+    chrome.windows.onFocusChanged.addListener(() => refreshTimerTargetFromTab());
+}
+
 async function startTimeEntry() {
     if (!trackTimePlayBtn) return;
     const typedTitle = trackTimeTitle ? trackTimeTitle.value.trim() : '';
-    let selectedWorkspaceId = null;
-    let selectedProjectId = null;
-    try {
-        const stored = await new Promise((resolve) => {
-            chrome.storage.local.get(['SELECTED_WORKSPACE_ID', 'SELECTED_PROJECT_ID'], (r) => resolve(r || {}));
-        });
-        selectedWorkspaceId = stored.SELECTED_WORKSPACE_ID || null;
-        selectedProjectId = stored.SELECTED_PROJECT_ID || null;
-    } catch (_) {
-        // fall through with nulls
-    }
+    const selectedWorkspaceId = await getSelectedWorkspaceId();
 
-    // D-on-A: matched Action's projectId wins; else SELECTED_PROJECT_ID; else null.
-    const payload = {};
-    if (trackTimeSelectedSuggestion && trackTimeSelectedSuggestion.actionId) {
-        payload.actionId = trackTimeSelectedSuggestion.actionId;
-    } else {
-        payload.typedTitle = typedTitle;
-        payload.projectId = selectedProjectId;
-        payload.workspaceId = selectedWorkspaceId;
-    }
+    // A matched Action resumes; else the picker's Ticket or Project; else the
+    // selected workspace only (see ExpoTimerTarget.buildStartPayload).
+    const payload = ExpoTimerTarget.buildStartPayload({
+        matchedAction: trackTimeSelectedSuggestion,
+        target: timerTarget,
+        typedTitle,
+        workspaceId: selectedWorkspaceId,
+    });
 
     trackTimePlayBtn.disabled = true;
     setTrackTimeStatus('Starting…', '');
@@ -3955,11 +4241,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     const allTabs = [tabSavePageBtn, tabCreateActionBtn, tabAddContactBtn, tabTrackTimeBtn, tabRecordingBtn].filter(Boolean);
     const allPanels = [panelSavePage, panelCreateAction, panelAddContact, panelTrackTime, panelRecording].filter(Boolean);
 
+    const sharedSelectorSummary = sharedProjectSelector ? sharedProjectSelector.querySelector('summary') : null;
+    const sharedSelectorSummaryText = sharedSelectorSummary ? sharedSelectorSummary.textContent : '';
+
     function switchTab(activeTab, activePanel) {
         allTabs.forEach(t => t.classList.remove('active'));
         allPanels.forEach(p => p.classList.remove('active'));
         if (activeTab) activeTab.classList.add('active');
         if (activePanel) activePanel.classList.add('active');
+        // On Track Time the "What's this for?" picker replaces Goal and Project.
+        const timerMode = activePanel === panelTrackTime;
+        if (sharedProjectSelector) sharedProjectSelector.classList.toggle('timer-mode', timerMode);
+        if (sharedSelectorSummary) sharedSelectorSummary.textContent = timerMode ? 'Workspace' : sharedSelectorSummaryText;
         // Refresh relative timestamps in the recent-items lists.
         Object.keys(RECENT_SECTIONS).forEach(renderRecentItems);
     }
@@ -3996,6 +4289,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             switchTab(tabTrackTimeBtn, panelTrackTime);
             reconcileActiveTimer();
             loadTimeEntries();
+            refreshTimerTargetFromTab();
         });
     }
     if (tabRecordingBtn) {
@@ -4003,6 +4297,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // Track Time wiring
+    wireTimerTargetPicker();
     if (trackTimePlayBtn) {
         trackTimePlayBtn.addEventListener('click', startTimeEntry);
     }
