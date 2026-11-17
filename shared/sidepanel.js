@@ -531,6 +531,8 @@ async function loadSharedGoalsAndProjects(workspaceId, { goalId, projectId } = {
     sharedProjectsCache = projects || [];
     renderSharedGoals(goalId);
     renderSharedProjects(projectId);
+    // The timer picker may have opened before this list arrived.
+    syncTimerTargetToSharedProject();
 }
 
 async function populateSharedDropdowns() {
@@ -2673,6 +2675,16 @@ function sharedProjectTarget() {
     });
 }
 
+// Once the shared project list has loaded, a picker still showing nothing (or
+// the shared project) takes the shared project. A pick by hand or a target
+// from the tab is left alone.
+function syncTimerTargetToSharedProject() {
+    if (!trackTimeTargetInput) return;
+    if (timerTargetSource !== null && timerTargetSource !== 'project') return;
+    if (timerTargetSource === null && timerTarget) return;
+    setTimerTarget(sharedProjectTarget(), 'project');
+}
+
 async function resolveTimerTarget(url) {
     try {
         const json = await trpcCall('timeEntry.resolveTarget', { url }, 'GET');
@@ -2711,10 +2723,12 @@ async function refreshTimerTargetFromTab() {
 async function findTimerTargetForPr() {
     if (!timerTargetPrUrl || !trackTimeTargetFindPr) return;
     const url = timerTargetPrUrl;
+    // A pick by hand (or another lookup) while this one is in flight wins.
+    const seq = ++timerTargetResolveSeq;
     trackTimeTargetFindPr.disabled = true;
     const resolved = await resolveTimerTarget(url);
     trackTimeTargetFindPr.disabled = false;
-    if (timerTargetPrUrl !== url) return;
+    if (seq !== timerTargetResolveSeq || timerTargetPrUrl !== url) return;
     if (resolved) {
         timerTargetPrUrl = null;
         setTimerTarget(resolved, 'tab');
@@ -2742,6 +2756,9 @@ function highlightTimerTargetOption() {
 }
 
 function chooseTimerTarget(target) {
+    // Supersede any tab or PR lookup still in flight.
+    timerTargetResolveSeq++;
+    timerTargetPrUrl = null;
     setTimerTarget(target, 'user');
     hideTimerTargetList();
     if (trackTimeTargetInput) {
@@ -2866,6 +2883,7 @@ function wireTimerTargetPicker() {
         trackTimeTargetClear.addEventListener('mousedown', (e) => {
             e.preventDefault();
             // Clearing hands the picker back to the tab on the next change.
+            timerTargetResolveSeq++;
             setTimerTarget(null, null);
         });
     }
