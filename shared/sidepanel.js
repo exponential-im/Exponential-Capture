@@ -35,7 +35,6 @@ const setupWorkspaceDropdown = document.getElementById('setupWorkspaceDropdown')
 const sharedProjectSelector = document.getElementById('sharedProjectSelector');
 const sharedWorkspace = document.getElementById('sharedWorkspace');
 const sharedProject = document.getElementById('sharedProject');
-const sharedGoal = document.getElementById('sharedGoal');
 const sharedPillars = document.getElementById('sharedPillars');
 
 // Tab elements
@@ -212,7 +211,7 @@ async function getApiKey() {
 }
 
 // The shared selector's project once its list has loaded. A blank selector then
-// means "no project" (e.g. the goal filter hid the stored one), so don't fall
+// means "no project" (e.g. the Pillar ticks hid the stored one), so don't fall
 // back to the stored id and silently file work under a project the user can't see.
 async function getSelectedProjectId() {
     if (sharedProject && sharedProjectsCache.length > 0) return sharedProject.value || null;
@@ -442,20 +441,8 @@ async function populateWorkspaceAndProjectDropdowns(wsSelect, projSelect, presel
     return workspaces;
 }
 
-async function fetchGoalsForWorkspace(workspaceId) {
-    try {
-        const json = await trpcCall('goal.getAllMyGoals', workspaceId ? { workspaceId } : undefined, 'GET');
-        const goals = extractTrpcData(json) || [];
-        return goals.filter(g => g.status !== 'archived' && g.status !== 'completed');
-    } catch (error) {
-        console.error('Error fetching goals for workspace:', error);
-        return [];
-    }
-}
-
-// Goals and the unfiltered project list for the shared selector's workspace;
-// the goal select narrows the project select to that goal's projects.
-let sharedGoalsCache = [];
+// The unfiltered project list for the shared selector's workspace; ticked
+// Pillars narrow what the project select shows.
 let sharedProjectsCache = [];
 let sharedLoadSeq = 0;
 
@@ -542,6 +529,29 @@ if (sharedPillars) {
     });
 }
 
+/**
+ * Where a new Action goes: the selected project, or the ticked Pillars (filed
+ * loose under them, in their workspace), or both. Refuses only when there is
+ * neither, so a capture never lands nowhere.
+ */
+async function actionPlacement() {
+    const projectId = await getSelectedProjectId();
+    const workspaceId = sharedWorkspace ? sharedWorkspace.value : '';
+    const tagIds = pillarTagIdsFor(workspaceId);
+    const hasProject = !!projectId && projectId !== 'default';
+    if (hasProjects && !hasProject && !tagIds) {
+        if (sharedProject) sharedProject.focus();
+        throw new Error('Please select a project or a Pillar first');
+    }
+    const placement = {};
+    if (hasProject) placement.projectId = projectId;
+    if (tagIds) {
+        placement.tagIds = tagIds;
+        placement.workspaceId = workspaceId;
+    }
+    return placement;
+}
+
 /** The ticked Pillars to send with a capture filed into `workspaceId`, if any. */
 function pillarTagIdsFor(workspaceId) {
     const selected = sharedWorkspace ? sharedWorkspace.value : '';
@@ -550,35 +560,15 @@ function pillarTagIdsFor(workspaceId) {
         : undefined;
 }
 
-function renderSharedGoals(preselectId) {
-    if (!sharedGoal) return;
-    sharedGoal.innerHTML = '<option value="" data-searchable-keep>All goals</option>';
-    sharedGoalsCache.forEach(goal => {
-        const option = document.createElement('option');
-        option.value = String(goal.id);
-        option.textContent = goal.title;
-        sharedGoal.appendChild(option);
-    });
-    const id = preselectId ? String(preselectId) : '';
-    sharedGoal.value = sharedGoalsCache.some(g => String(g.id) === id) ? id : '';
-    sharedGoal.style.display = sharedGoalsCache.length === 0 ? 'none' : '';
-}
-
 function renderSharedProjects(preselectId) {
-    const previous = sharedProject.value;
-    const goal = sharedGoal && sharedGoal.value
-        ? sharedGoalsCache.find(g => String(g.id) === sharedGoal.value)
-        : null;
-    const goalProjectIds = goal ? new Set((goal.projects || []).map(p => p.id)) : null;
-    const goalProjects = goalProjectIds
-        ? sharedProjectsCache.filter(p => goalProjectIds.has(p.id))
-        : sharedProjectsCache;
-    // Ticked Pillars narrow the list to projects under them.
-    const projects = ExpoPillarCapture.projectsForPillars(goalProjects, tickedPillarIds);
-    const narrowed = goal || tickedPillarIds.length > 0;
-    const placeholder = narrowed && projects.length === 0
-        ? (tickedPillarIds.length > 0 ? 'No projects under these Pillars' : 'No projects for this goal')
-        : (tickedPillarIds.length > 0 ? 'No project (file under the Pillars)' : 'Select project...');
+    // Ticked Pillars narrow the list to projects under them. The project being
+    // selected stays listed even so (a new project carries no Pillars yet).
+    const projects = ExpoPillarCapture.projectsForPillars(sharedProjectsCache, tickedPillarIds);
+    const chosen = preselectId && sharedProjectsCache.find(p => p.id === preselectId);
+    if (chosen && !projects.includes(chosen)) projects.push(chosen);
+    const placeholder = tickedPillarIds.length === 0
+        ? 'Select project...'
+        : (projects.length === 0 ? 'No projects under these Pillars' : 'No project (file under the Pillars)');
 
     sharedProject.innerHTML = `<option value="">${placeholder}</option>`;
     projects.forEach(project => {
@@ -597,11 +587,6 @@ function renderSharedProjects(preselectId) {
 
     if (preselectId && projects.some(p => p.id === preselectId)) {
         sharedProject.value = preselectId;
-    } else if (goal && projects.length === 1) {
-        // A goal with a single project: pick it rather than make the user do it,
-        // and run the normal change handling (persist, stop any recording).
-        sharedProject.value = projects[0].id;
-        if (sharedProject.value !== previous) sharedProject.dispatchEvent(new Event('change'));
     } else {
         sharedProject.value = '';
     }
@@ -609,25 +594,22 @@ function renderSharedProjects(preselectId) {
     syncResourceProjectUi();
 }
 
-async function loadSharedGoalsAndProjects(workspaceId, { goalId, projectId } = {}) {
+async function loadSharedProjectsAndPillars(workspaceId, { projectId } = {}) {
     if (!sharedProject) return;
     const seq = ++sharedLoadSeq;
     sharedProject.innerHTML = '<option value="">Loading projects...</option>';
-    const [goals, projects, pillars, ticks] = await Promise.all([
-        fetchGoalsForWorkspace(workspaceId),
+    const [projects, pillars, ticks] = await Promise.all([
         workspaceId ? fetchProjectsForWorkspace(workspaceId) : fetchProjects(),
         fetchPillarsForWorkspace(workspaceId),
         workspaceId ? storedPillarTicks(workspaceId) : Promise.resolve([]),
     ]);
     // A newer workspace change superseded this load.
     if (seq !== sharedLoadSeq) return;
-    sharedGoalsCache = goals;
     sharedProjectsCache = projects || [];
     sharedPillarsCache = pillars;
     const offered = new Set(pillars.map(p => p.id));
     tickedPillarIds = ticks.filter(id => offered.has(id));
     renderSharedPillars();
-    renderSharedGoals(goalId);
     renderSharedProjects(projectId);
     // The timer picker may have opened before this list arrived.
     syncTimerTargetToSharedProject();
@@ -636,7 +618,9 @@ async function loadSharedGoalsAndProjects(workspaceId, { goalId, projectId } = {
 async function populateSharedDropdowns() {
     if (!sharedWorkspace || !sharedProject) return;
 
-    const stored = await chrome.storage.local.get(['SELECTED_WORKSPACE_ID', 'SELECTED_GOAL_ID', 'SELECTED_PROJECT_ID']);
+    const stored = await chrome.storage.local.get(['SELECTED_WORKSPACE_ID', 'SELECTED_PROJECT_ID']);
+    // The Goal filter is gone (Pillars replaced it); drop its stored setting.
+    chrome.storage.local.remove('SELECTED_GOAL_ID');
     const workspaces = await fetchWorkspaces();
 
     sharedWorkspace.innerHTML = '<option value="">Select workspace...</option>';
@@ -654,9 +638,8 @@ async function populateSharedDropdowns() {
         sharedWorkspace.value = workspaces[0].id;
     }
 
-    // Populate goals and projects based on selected workspace
-    await loadSharedGoalsAndProjects(sharedWorkspace.value, {
-        goalId: stored.SELECTED_GOAL_ID,
+    // Populate Pillars and projects for the selected workspace
+    await loadSharedProjectsAndPillars(sharedWorkspace.value, {
         projectId: stored.SELECTED_PROJECT_ID,
     });
 }
@@ -981,7 +964,7 @@ function makeSearchableSelect(select) {
     syncInput();
 }
 
-[setupWorkspaceDropdown, projectDropdown, sharedWorkspace, sharedGoal, sharedProject, createActionPriority]
+[setupWorkspaceDropdown, projectDropdown, sharedWorkspace, sharedProject, createActionPriority]
     .forEach(makeSearchableSelect);
 
 // Setup flow: workspace change cascades to project dropdown
@@ -998,26 +981,11 @@ if (sharedWorkspace) {
         if (workspaceId) {
             chrome.storage.local.set({ SELECTED_WORKSPACE_ID: workspaceId });
         }
-        // Goals belong to a workspace, so a workspace change resets the goal filter.
-        chrome.storage.local.remove('SELECTED_GOAL_ID');
         updateNewProjectHelp();
-        await loadSharedGoalsAndProjects(workspaceId);
+        await loadSharedProjectsAndPillars(workspaceId);
         // A pick from the previous workspace doesn't carry over.
         timerTargetSource = null;
         refreshTimerTargetFromTab();
-    });
-}
-
-// Shared goal change: narrow projects to the goal's, and persist to storage
-if (sharedGoal) {
-    sharedGoal.addEventListener('change', () => {
-        const goalId = sharedGoal.value;
-        if (goalId) {
-            chrome.storage.local.set({ SELECTED_GOAL_ID: goalId });
-        } else {
-            chrome.storage.local.remove('SELECTED_GOAL_ID');
-        }
-        renderSharedProjects(sharedProject.value);
     });
 }
 
@@ -1202,11 +1170,7 @@ async function apiLinkActionsToTranscription(actionIds, transcriptionSessionId) 
 }
 
 async function createActionForRecording(name, sessionId) {
-    const projectId = await getSelectedProjectId();
-    if (hasProjects && !projectId) {
-        if (sharedProject) sharedProject.focus();
-        throw new Error('Please select a project first');
-    }
+    const placement = await actionPlacement();
 
     const body = {
         json: {
@@ -1216,9 +1180,7 @@ async function createActionForRecording(name, sessionId) {
             parseNaturalLanguage: true,
         }
     };
-    if (projectId && projectId !== 'default') {
-        body.json.projectId = projectId;
-    }
+    Object.assign(body.json, placement);
 
     const response = await authenticatedFetch(`${apiBaseURL}/api/trpc/action.quickCreate`, {
         method: 'POST',
@@ -2713,7 +2675,7 @@ function onTrackTimeInputChanged() {
 
 // ── Track Time: the "What's this for?" picker ───────────────────────────
 // One pick, a Ticket or a Project (exponential-app: "Log timer time against
-// Tickets"). It replaces the shared Goal and Project selects on this tab;
+// Tickets"). It replaces the shared Pillars and Project selects on this tab;
 // the shared Workspace select stays and scopes the search.
 
 const TIMER_TARGET_SEARCH_DEBOUNCE_MS = 150;
@@ -3751,7 +3713,7 @@ async function handleResourceSave() {
 let resourceUiProjectId;
 
 // Called whenever the shared picker's project may have changed: by hand, or
-// because the list was reloaded for another workspace or goal.
+// because the list was reloaded for another workspace.
 function syncResourceProjectUi() {
     if (!hasSavePage) return;
     const project = selectedProject();
@@ -4205,9 +4167,7 @@ async function switchToLinkedProject(key, link, button) {
             if (workspaceId) chrome.storage.local.set({ SELECTED_WORKSPACE_ID: workspaceId });
             updateNewProjectHelp();
         }
-        // A goal filter could hide the project; the load below clears it.
-        chrome.storage.local.remove('SELECTED_GOAL_ID');
-        await loadSharedGoalsAndProjects(workspaceId, { projectId: link.projectId });
+        await loadSharedProjectsAndPillars(workspaceId, { projectId: link.projectId });
         if (sharedProject.value === link.projectId) {
             sharedProject.dispatchEvent(new Event('change'));
         }
@@ -4302,12 +4262,7 @@ async function createNewProject() {
 
         // Only if the picker still shows the workspace the project went into.
         if (sharedWorkspace.value === workspaceId) {
-            sharedProjectsCache.push({ id: project.id, name: project.name || name, slug: project.slug });
-            // A goal filter would hide a project that belongs to no goal yet.
-            if (sharedGoal && sharedGoal.value) {
-                sharedGoal.value = '';
-                chrome.storage.local.remove('SELECTED_GOAL_ID');
-            }
+            sharedProjectsCache.push({ id: project.id, name: project.name || name, slug: project.slug, pillarTagIds: [] });
             renderSharedProjects(project.id);
             // The picker's own handler persists the selection.
             sharedProject.dispatchEvent(new Event('change'));
@@ -4355,7 +4310,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         allPanels.forEach(p => p.classList.remove('active'));
         if (activeTab) activeTab.classList.add('active');
         if (activePanel) activePanel.classList.add('active');
-        // On Track Time the "What's this for?" picker replaces Goal and Project.
+        // On Track Time the "What's this for?" picker replaces Pillars and Project.
         const timerMode = activePanel === panelTrackTime;
         if (sharedProjectSelector) sharedProjectSelector.classList.toggle('timer-mode', timerMode);
         if (sharedSelectorSummary) sharedSelectorSummary.textContent = timerMode ? 'Workspace' : sharedSelectorSummaryText;
@@ -4474,11 +4429,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             savePageBtn.disabled = true;
             savePageBtn.textContent = 'Saving...';
             try {
-                const projectId = await getSelectedProjectId();
-                if (hasProjects && !projectId) {
-                    if (sharedProject) sharedProject.focus();
-                    throw new Error('Please select a project first');
-                }
+                const placement = await actionPlacement();
                 const context = savePageContext ? savePageContext.value : '';
                 const description = (savePageDescToggle && savePageDescToggle.checked && savePageDesc)
                     ? savePageDesc.value.trim()
@@ -4492,9 +4443,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         parseNaturalLanguage: true,
                     }
                 };
-                if (projectId && projectId !== 'default') {
-                    body.json.projectId = projectId;
-                }
+                Object.assign(body.json, placement);
                 const response = await authenticatedFetch(`${apiBaseURL}/api/trpc/action.quickCreate`, {
                     method: 'POST',
                     body: JSON.stringify(body)
@@ -4611,11 +4560,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             createActionBtn.disabled = true;
             createActionBtn.textContent = 'Creating...';
             try {
-                const projectId = await getSelectedProjectId();
-                if (hasProjects && !projectId) {
-                    if (sharedProject) sharedProject.focus();
-                    throw new Error('Please select a project first');
-                }
+                const placement = await actionPlacement();
                 const description = createActionDesc ? createActionDesc.value.trim() : '';
                 const priority = createActionPriority ? createActionPriority.value : 'Quick';
                 const body = {
@@ -4626,9 +4571,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         parseNaturalLanguage: true,
                     }
                 };
-                if (projectId && projectId !== 'default') {
-                    body.json.projectId = projectId;
-                }
+                Object.assign(body.json, placement);
                 const response = await authenticatedFetch(`${apiBaseURL}/api/trpc/action.quickCreate`, {
                     method: 'POST',
                     body: JSON.stringify(body)

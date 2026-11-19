@@ -1729,11 +1729,9 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
-      /* On the Track Time tab the picker replaces the shared Goal and Project
-         selects; only the Workspace select stays. */
-      .shared-project-selector.timer-mode .searchable-select:has(#sharedGoal),
+      /* On the Track Time tab the picker replaces the shared Pillars and
+         Project selects; only the Workspace select stays. */
       .shared-project-selector.timer-mode .searchable-select:has(#sharedProject),
-      .shared-project-selector.timer-mode #sharedGoal,
       .shared-project-selector.timer-mode #sharedProject,
       .shared-project-selector.timer-mode #sharedPillars,
       .shared-project-selector.timer-mode #newProjectRow {
@@ -1850,7 +1848,7 @@
 
     <!-- Shared workspace/project selector (above tabs) - Collapsible for progressive disclosure -->
     <details class="shared-project-selector" id="sharedProjectSelector">
-      <summary>Workspace, Goal & Project</summary>
+      <summary>Workspace, Pillars & Project</summary>
       <div style="padding-top: 8px;">
         <select class="shared-select" id="sharedWorkspace">
           <option value="">Select workspace...</option>
@@ -1858,9 +1856,6 @@
         <!-- Pillars: standing areas of the workspace's work (exponential-app
              ADR-0085). Several, or none; what is saved is filed under them. -->
         <div class="pillar-chips" id="sharedPillars" role="group" aria-label="Pillars" hidden></div>
-        <select class="shared-select" id="sharedGoal" style="display:none;">
-          <option value="" data-searchable-keep>All goals</option>
-        </select>
         <select class="shared-select" id="sharedProject">
           <option value="">Select project...</option>
         </select>
