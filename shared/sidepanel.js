@@ -506,6 +506,8 @@ function setTickedPillars(ids) {
     tickedPillarIds = [...new Set(ids)].filter(id => offered.has(id));
     renderSharedPillars();
     persistPillarTicks();
+    // The project list follows the ticks; a project they hide is unselected.
+    if (sharedProject && sharedProjectsCache.length > 0) renderSharedProjects(sharedProject.value);
 }
 
 function renderSharedPillars() {
@@ -568,11 +570,17 @@ function renderSharedProjects(preselectId) {
         ? sharedGoalsCache.find(g => String(g.id) === sharedGoal.value)
         : null;
     const goalProjectIds = goal ? new Set((goal.projects || []).map(p => p.id)) : null;
-    const projects = goalProjectIds
+    const goalProjects = goalProjectIds
         ? sharedProjectsCache.filter(p => goalProjectIds.has(p.id))
         : sharedProjectsCache;
+    // Ticked Pillars narrow the list to projects under them.
+    const projects = ExpoPillarCapture.projectsForPillars(goalProjects, tickedPillarIds);
+    const narrowed = goal || tickedPillarIds.length > 0;
+    const placeholder = narrowed && projects.length === 0
+        ? (tickedPillarIds.length > 0 ? 'No projects under these Pillars' : 'No projects for this goal')
+        : (tickedPillarIds.length > 0 ? 'No project (file under the Pillars)' : 'Select project...');
 
-    sharedProject.innerHTML = `<option value="">${goal && projects.length === 0 ? 'No projects for this goal' : 'Select project...'}</option>`;
+    sharedProject.innerHTML = `<option value="">${placeholder}</option>`;
     projects.forEach(project => {
         const option = document.createElement('option');
         option.value = project.id;
@@ -1027,6 +1035,11 @@ if (sharedProject) {
         if (projectId) {
             if (isListening) stopListening();
             chrome.storage.local.set({ SELECTED_PROJECT_ID: projectId });
+            // Choosing a project ticks its Pillars (those this picker shows).
+            const project = sharedProjectsCache.find(p => p.id === projectId) || null;
+            const next = ExpoPillarCapture.pillarsAfterProjectChoice(
+                tickedPillarIds, project, sharedPillarsCache.map(p => p.id));
+            if (next.length !== tickedPillarIds.length) setTickedPillars(next);
         }
         syncResourceProjectUi();
     });
