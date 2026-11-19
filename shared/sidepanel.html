@@ -629,6 +629,55 @@
         color: var(--text-muted);
       }
       /* Suggestion shown on every tab when the browser tab group is linked to a project */
+      /* Pillar multi-select: one toggle chip per Pillar of the workspace */
+      .pillar-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: var(--space-xs);
+      }
+      .pillar-chips-label {
+        width: 100%;
+        font-size: var(--font-size-xs);
+        color: var(--text-muted);
+      }
+      .pillar-chip {
+        width: auto;
+        margin: 0;
+        padding: 3px 10px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-pill);
+        background: var(--surface);
+        color: var(--text-2);
+        font-size: var(--font-size-xs);
+        font-weight: var(--font-weight-medium);
+        cursor: pointer;
+      }
+      .pillar-chip:hover {
+        border-color: var(--border-strong);
+      }
+      /* The ticked Pillars, on the collapsed selector's summary line */
+      .pillar-summary {
+        margin-left: var(--space-xs);
+        padding: 1px 8px;
+        border-radius: var(--radius-pill);
+        background: var(--color-primary-soft);
+        color: var(--color-primary-text);
+        font-size: var(--font-size-xs);
+        font-weight: var(--font-weight-medium);
+      }
+      .shared-project-selector.timer-mode .pillar-summary {
+        display: none;
+      }
+      /* Ticked (or offered) because the open page matched it */
+      .pillar-chip[data-suggested="true"]::before {
+        content: "✦ ";
+      }
+      .pillar-chip[aria-pressed="true"] {
+        border-color: var(--color-primary);
+        background: var(--color-primary-soft);
+        color: var(--color-primary-text);
+      }
       .group-link-chip {
         display: flex;
         align-items: center;
@@ -1697,12 +1746,11 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
-      /* On the Track Time tab the picker replaces the shared Goal and Project
-         selects; only the Workspace select stays. */
-      .shared-project-selector.timer-mode .searchable-select:has(#sharedGoal),
+      /* On the Track Time tab the picker replaces the shared Pillars and
+         Project selects; only the Workspace select stays. */
       .shared-project-selector.timer-mode .searchable-select:has(#sharedProject),
-      .shared-project-selector.timer-mode #sharedGoal,
       .shared-project-selector.timer-mode #sharedProject,
+      .shared-project-selector.timer-mode #sharedPillars,
       .shared-project-selector.timer-mode #newProjectRow {
         display: none !important;
       }
@@ -1817,14 +1865,14 @@
 
     <!-- Shared workspace/project selector (above tabs) - Collapsible for progressive disclosure -->
     <details class="shared-project-selector" id="sharedProjectSelector">
-      <summary>Workspace, Goal & Project</summary>
+      <summary><span id="sharedSelectorLabel">Workspace, Pillars & Project</span><span class="pillar-summary" id="sharedPillarsSummary" aria-label="Ticked Pillars" hidden></span></summary>
       <div style="padding-top: 8px;">
         <select class="shared-select" id="sharedWorkspace">
           <option value="">Select workspace...</option>
         </select>
-        <select class="shared-select" id="sharedGoal" style="display:none;">
-          <option value="" data-searchable-keep>All goals</option>
-        </select>
+        <!-- Pillars: standing areas of the workspace's work (exponential-app
+             ADR-0085). Several, or none; what is saved is filed under them. -->
+        <div class="pillar-chips" id="sharedPillars" role="group" aria-label="Pillars" hidden></div>
         <select class="shared-select" id="sharedProject">
           <option value="">Select project...</option>
         </select>
@@ -2059,6 +2107,7 @@
     <script src="speech-engine-whisper.js"></script>
     <script src="page-identity.js"></script>
     <script src="timer-target.js"></script>
+    <script src="pillar-capture.js"></script>
     <script src="sidepanel.js"></script>
   </body>
 </html>

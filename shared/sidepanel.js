@@ -35,7 +35,7 @@ const setupWorkspaceDropdown = document.getElementById('setupWorkspaceDropdown')
 const sharedProjectSelector = document.getElementById('sharedProjectSelector');
 const sharedWorkspace = document.getElementById('sharedWorkspace');
 const sharedProject = document.getElementById('sharedProject');
-const sharedGoal = document.getElementById('sharedGoal');
+const sharedPillars = document.getElementById('sharedPillars');
 
 // Tab elements
 const panelTabs = document.getElementById('panelTabs');
@@ -211,7 +211,7 @@ async function getApiKey() {
 }
 
 // The shared selector's project once its list has loaded. A blank selector then
-// means "no project" (e.g. the goal filter hid the stored one), so don't fall
+// means "no project" (e.g. the Pillar ticks hid the stored one), so don't fall
 // back to the stored id and silently file work under a project the user can't see.
 async function getSelectedProjectId() {
     if (sharedProject && sharedProjectsCache.length > 0) return sharedProject.value || null;
@@ -441,20 +441,8 @@ async function populateWorkspaceAndProjectDropdowns(wsSelect, projSelect, presel
     return workspaces;
 }
 
-async function fetchGoalsForWorkspace(workspaceId) {
-    try {
-        const json = await trpcCall('goal.getAllMyGoals', workspaceId ? { workspaceId } : undefined, 'GET');
-        const goals = extractTrpcData(json) || [];
-        return goals.filter(g => g.status !== 'archived' && g.status !== 'completed');
-    } catch (error) {
-        console.error('Error fetching goals for workspace:', error);
-        return [];
-    }
-}
-
-// Goals and the unfiltered project list for the shared selector's workspace;
-// the goal select narrows the project select to that goal's projects.
-let sharedGoalsCache = [];
+// The unfiltered project list for the shared selector's workspace; ticked
+// Pillars narrow what the project select shows.
 let sharedProjectsCache = [];
 let sharedLoadSeq = 0;
 
@@ -464,31 +452,216 @@ const NEW_PROJECT_VALUE = '__new__';
 // (or cancelling) leaves the selection where it was.
 let lastRealProjectId = '';
 
-function renderSharedGoals(preselectId) {
-    if (!sharedGoal) return;
-    sharedGoal.innerHTML = '<option value="" data-searchable-keep>All goals</option>';
-    sharedGoalsCache.forEach(goal => {
-        const option = document.createElement('option');
-        option.value = String(goal.id);
-        option.textContent = goal.title;
-        sharedGoal.appendChild(option);
+// --- Pillars (exponential-app ADR-0085) ---
+// The workspace's active Pillars and the ticked ones. Ticks are remembered per
+// workspace: a Pillar belongs to one workspace, so another workspace's ticks
+// never apply.
+const PILLAR_TICKS_KEY = 'SELECTED_PILLAR_IDS_BY_WORKSPACE';
+let sharedPillarsCache = [];
+let tickedPillarIds = [];
+// The workspace the cached Pillars and ticks belong to. Empty while another
+// workspace's Pillars are loading, so stale ticks are never sent or stored.
+let pillarsWorkspaceId = '';
+// Suggestions for the open page, matched in the browser: Pillars ticked only because
+// this page matched them, the suggestions the person unticked here, and which
+// page (workspace + address) they belong to.
+let autoTickedPillarIds = [];
+let declinedSuggestionIds = [];
+let suggestedPillarIds = [];
+let suggestionPageKey = '';
+let suggestionText = '';
+let suggestionSeq = 0;
+
+async function fetchPillarsForWorkspace(workspaceId) {
+    if (!workspaceId) return [];
+    try {
+        const json = await trpcCall('pillar.list', { workspaceId }, 'GET');
+        return extractTrpcData(json) || [];
+    } catch (error) {
+        // An app without Pillars yet (or a network blip): capture works without them.
+        console.error('Error fetching pillars for workspace:', error);
+        return [];
+    }
+}
+
+async function storedPillarTicks(workspaceId) {
+    const stored = await chrome.storage.local.get([PILLAR_TICKS_KEY]);
+    const byWorkspace = stored[PILLAR_TICKS_KEY] || {};
+    return Array.isArray(byWorkspace[workspaceId]) ? byWorkspace[workspaceId] : [];
+}
+
+async function persistPillarTicks() {
+    const workspaceId = pillarsWorkspaceId;
+    if (!workspaceId) return;
+    const stored = await chrome.storage.local.get([PILLAR_TICKS_KEY]);
+    const byWorkspace = stored[PILLAR_TICKS_KEY] || {};
+    // A tick only this page's suggestion made is not the person's choice.
+    byWorkspace[workspaceId] = tickedPillarIds.filter(id => !autoTickedPillarIds.includes(id));
+    await chrome.storage.local.set({ [PILLAR_TICKS_KEY]: byWorkspace });
+}
+
+function setTickedPillars(ids) {
+    // Only Pillars this workspace offers can stay ticked.
+    const offered = new Set(sharedPillarsCache.map(p => p.id));
+    tickedPillarIds = [...new Set(ids)].filter(id => offered.has(id));
+    renderSharedPillars();
+    persistPillarTicks();
+    // The project list follows the ticks; a project they hide is unselected.
+    if (sharedProject && sharedProjectsCache.length > 0) renderSharedProjects(sharedProject.value);
+}
+
+// The ticked Pillars on the selector's summary line, so they are in view even
+// while the selector is collapsed: a save is never filed under Pillars the
+// person cannot see.
+function renderPillarSummary() {
+    const el = document.getElementById('sharedPillarsSummary');
+    if (!el) return;
+    const ticked = sharedPillarsCache.filter(p => tickedPillarIds.includes(p.id));
+    el.textContent = ticked.length === 0
+        ? ''
+        : ticked.map(p => (suggestedPillarIds.includes(p.id) ? `✦ ${p.name}` : p.name)).join(', ');
+    el.hidden = ticked.length === 0;
+}
+
+function renderSharedPillars() {
+    if (!sharedPillars) return;
+    renderPillarSummary();
+    sharedPillars.replaceChildren();
+    sharedPillars.hidden = sharedPillarsCache.length === 0;
+    if (sharedPillarsCache.length === 0) return;
+    const label = document.createElement('span');
+    label.className = 'pillar-chips-label';
+    label.textContent = 'Pillars';
+    sharedPillars.appendChild(label);
+    sharedPillarsCache.forEach(pillar => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'pillar-chip';
+        chip.textContent = pillar.name;
+        chip.dataset.pillarId = pillar.id;
+        chip.setAttribute('aria-pressed', tickedPillarIds.includes(pillar.id) ? 'true' : 'false');
+        if (pillar.description) chip.title = pillar.description;
+        if (suggestedPillarIds.includes(pillar.id)) {
+            chip.dataset.suggested = 'true';
+            chip.title = `Suggested for this page${pillar.description ? ` — ${pillar.description}` : ''}`;
+        }
+        sharedPillars.appendChild(chip);
     });
-    const id = preselectId ? String(preselectId) : '';
-    sharedGoal.value = sharedGoalsCache.some(g => String(g.id) === id) ? id : '';
-    sharedGoal.style.display = sharedGoalsCache.length === 0 ? 'none' : '';
+}
+
+if (sharedPillars) {
+    sharedPillars.addEventListener('click', (event) => {
+        const chip = event.target.closest('.pillar-chip');
+        if (!chip) return;
+        const id = chip.dataset.pillarId;
+        const next = ExpoPillarCapture.personToggled({
+            ticked: tickedPillarIds, auto: autoTickedPillarIds, declined: declinedSuggestionIds,
+        }, id);
+        autoTickedPillarIds = next.auto;
+        declinedSuggestionIds = next.declined;
+        setTickedPillars(next.ticked);
+    });
+}
+
+/**
+ * Pre-tick the Pillars that match the open page, for the person to see and
+ * untick. The page is matched here, against the Pillars already downloaded:
+ * nothing about it leaves the browser before Save (docs/adr/0001). Moving to
+ * another page takes back the ticks only the previous page's suggestions
+ * made; ticks the person made stay.
+ */
+async function refreshPillarSuggestions() {
+    if (!sharedPillars || typeof chrome.tabs === 'undefined') return;
+    const workspaceId = sharedWorkspace ? sharedWorkspace.value : '';
+    let tab = null;
+    try {
+        [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    } catch { tab = null; }
+    const url = tab && /^https?:/.test(tab.url || '') ? ExpoPageIdentity.savedAddress(tab.url) : null;
+    const key = workspaceId && url ? `${workspaceId}|${url}` : '';
+    // The title arrives after the address, so the same page is asked again
+    // once it has one; the person's unticks on it still hold.
+    const text = url ? `${tab.title || ''} ${url}`.slice(0, 4000) : '';
+    if (key === suggestionPageKey && text === suggestionText) return;
+
+    const seq = ++suggestionSeq;
+    if (key !== suggestionPageKey) {
+        const back = ExpoPillarCapture.forgetPageSuggestions({ ticked: tickedPillarIds, auto: autoTickedPillarIds });
+        suggestionPageKey = key;
+        autoTickedPillarIds = back.auto;
+        declinedSuggestionIds = [];
+        suggestedPillarIds = [];
+        if (back.ticked.length !== tickedPillarIds.length) setTickedPillars(back.ticked);
+        else renderSharedPillars();
+    }
+    suggestionText = text;
+    if (!key || sharedPillarsCache.length === 0) return;
+
+    // Another page, or another workspace, superseded this one.
+    if (seq !== suggestionSeq) return;
+    suggestedPillarIds = ExpoPillarCapture.suggestPillars(sharedPillarsCache, text);
+    const next = ExpoPillarCapture.applySuggestions({
+        ticked: tickedPillarIds, auto: autoTickedPillarIds,
+        declined: declinedSuggestionIds, suggested: suggestedPillarIds,
+    });
+    autoTickedPillarIds = next.auto;
+    if (next.ticked.length !== tickedPillarIds.length) setTickedPillars(next.ticked);
+    else renderSharedPillars();
+}
+
+if (typeof chrome !== 'undefined' && chrome.tabs) {
+    chrome.tabs.onActivated.addListener(() => refreshPillarSuggestions());
+    chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+        if (tab.active && (changeInfo.url || changeInfo.title || changeInfo.status === 'complete')) {
+            refreshPillarSuggestions();
+        }
+    });
+    if (chrome.windows) chrome.windows.onFocusChanged.addListener(() => refreshPillarSuggestions());
+}
+
+/**
+ * Where a new Action goes: the selected project, or the ticked Pillars (filed
+ * loose under them, in their workspace), or both. Refuses only when there is
+ * neither, so a capture never lands nowhere.
+ */
+async function actionPlacement() {
+    const projectId = await getSelectedProjectId();
+    const workspaceId = sharedWorkspace ? sharedWorkspace.value : '';
+    const tagIds = pillarTagIdsFor(workspaceId);
+    const hasProject = !!projectId && projectId !== 'default';
+    if (hasProjects && !hasProject && !tagIds) {
+        if (sharedProject) sharedProject.focus();
+        throw new Error('Please select a project or a Pillar first');
+    }
+    const placement = {};
+    if (hasProject) placement.projectId = projectId;
+    if (tagIds) {
+        placement.tagIds = tagIds;
+        placement.workspaceId = workspaceId;
+    }
+    return placement;
+}
+
+/** The ticked Pillars to send with a capture filed into `workspaceId`, if any. */
+function pillarTagIdsFor(workspaceId) {
+    const selected = sharedWorkspace ? sharedWorkspace.value : '';
+    return workspaceId && workspaceId === selected && workspaceId === pillarsWorkspaceId
+        && tickedPillarIds.length > 0
+        ? [...tickedPillarIds]
+        : undefined;
 }
 
 function renderSharedProjects(preselectId) {
-    const previous = sharedProject.value;
-    const goal = sharedGoal && sharedGoal.value
-        ? sharedGoalsCache.find(g => String(g.id) === sharedGoal.value)
-        : null;
-    const goalProjectIds = goal ? new Set((goal.projects || []).map(p => p.id)) : null;
-    const projects = goalProjectIds
-        ? sharedProjectsCache.filter(p => goalProjectIds.has(p.id))
-        : sharedProjectsCache;
+    // Ticked Pillars narrow the list to projects under them. The project being
+    // selected stays listed even so (a new project carries no Pillars yet).
+    const projects = ExpoPillarCapture.projectsForPillars(sharedProjectsCache, tickedPillarIds);
+    const chosen = preselectId && sharedProjectsCache.find(p => p.id === preselectId);
+    if (chosen && !projects.includes(chosen)) projects.push(chosen);
+    const placeholder = tickedPillarIds.length === 0
+        ? 'Select project...'
+        : (projects.length === 0 ? 'No projects under these Pillars' : 'No project (file under the Pillars)');
 
-    sharedProject.innerHTML = `<option value="">${goal && projects.length === 0 ? 'No projects for this goal' : 'Select project...'}</option>`;
+    sharedProject.innerHTML = `<option value="">${placeholder}</option>`;
     projects.forEach(project => {
         const option = document.createElement('option');
         option.value = project.id;
@@ -505,11 +678,6 @@ function renderSharedProjects(preselectId) {
 
     if (preselectId && projects.some(p => p.id === preselectId)) {
         sharedProject.value = preselectId;
-    } else if (goal && projects.length === 1) {
-        // A goal with a single project: pick it rather than make the user do it,
-        // and run the normal change handling (persist, stop any recording).
-        sharedProject.value = projects[0].id;
-        if (sharedProject.value !== previous) sharedProject.dispatchEvent(new Event('change'));
     } else {
         sharedProject.value = '';
     }
@@ -517,19 +685,36 @@ function renderSharedProjects(preselectId) {
     syncResourceProjectUi();
 }
 
-async function loadSharedGoalsAndProjects(workspaceId, { goalId, projectId } = {}) {
+async function loadSharedProjectsAndPillars(workspaceId, { projectId } = {}) {
     if (!sharedProject) return;
     const seq = ++sharedLoadSeq;
     sharedProject.innerHTML = '<option value="">Loading projects...</option>';
-    const [goals, projects] = await Promise.all([
-        fetchGoalsForWorkspace(workspaceId),
+    // The previous workspace's Pillars and ticks stop applying now, not when
+    // the new ones arrive.
+    pillarsWorkspaceId = '';
+    sharedPillarsCache = [];
+    tickedPillarIds = [];
+    renderSharedPillars();
+    const [projects, pillars, ticks] = await Promise.all([
         workspaceId ? fetchProjectsForWorkspace(workspaceId) : fetchProjects(),
+        fetchPillarsForWorkspace(workspaceId),
+        workspaceId ? storedPillarTicks(workspaceId) : Promise.resolve([]),
     ]);
     // A newer workspace change superseded this load.
     if (seq !== sharedLoadSeq) return;
-    sharedGoalsCache = goals;
     sharedProjectsCache = projects || [];
-    renderSharedGoals(goalId);
+    sharedPillarsCache = pillars;
+    pillarsWorkspaceId = workspaceId || '';
+    const offered = new Set(pillars.map(p => p.id));
+    tickedPillarIds = ticks.filter(id => offered.has(id));
+    // Fresh Pillars: suggestions start over for the open page.
+    autoTickedPillarIds = [];
+    declinedSuggestionIds = [];
+    suggestedPillarIds = [];
+    suggestionPageKey = '';
+    suggestionText = '';
+    renderSharedPillars();
+    refreshPillarSuggestions();
     renderSharedProjects(projectId);
     // The timer picker may have opened before this list arrived.
     syncTimerTargetToSharedProject();
@@ -538,7 +723,9 @@ async function loadSharedGoalsAndProjects(workspaceId, { goalId, projectId } = {
 async function populateSharedDropdowns() {
     if (!sharedWorkspace || !sharedProject) return;
 
-    const stored = await chrome.storage.local.get(['SELECTED_WORKSPACE_ID', 'SELECTED_GOAL_ID', 'SELECTED_PROJECT_ID']);
+    const stored = await chrome.storage.local.get(['SELECTED_WORKSPACE_ID', 'SELECTED_PROJECT_ID']);
+    // The Goal filter is gone (Pillars replaced it); drop its stored setting.
+    chrome.storage.local.remove('SELECTED_GOAL_ID');
     const workspaces = await fetchWorkspaces();
 
     sharedWorkspace.innerHTML = '<option value="">Select workspace...</option>';
@@ -556,9 +743,8 @@ async function populateSharedDropdowns() {
         sharedWorkspace.value = workspaces[0].id;
     }
 
-    // Populate goals and projects based on selected workspace
-    await loadSharedGoalsAndProjects(sharedWorkspace.value, {
-        goalId: stored.SELECTED_GOAL_ID,
+    // Populate Pillars and projects for the selected workspace
+    await loadSharedProjectsAndPillars(sharedWorkspace.value, {
         projectId: stored.SELECTED_PROJECT_ID,
     });
 }
@@ -883,7 +1069,7 @@ function makeSearchableSelect(select) {
     syncInput();
 }
 
-[setupWorkspaceDropdown, projectDropdown, sharedWorkspace, sharedGoal, sharedProject, createActionPriority]
+[setupWorkspaceDropdown, projectDropdown, sharedWorkspace, sharedProject, createActionPriority]
     .forEach(makeSearchableSelect);
 
 // Setup flow: workspace change cascades to project dropdown
@@ -900,26 +1086,11 @@ if (sharedWorkspace) {
         if (workspaceId) {
             chrome.storage.local.set({ SELECTED_WORKSPACE_ID: workspaceId });
         }
-        // Goals belong to a workspace, so a workspace change resets the goal filter.
-        chrome.storage.local.remove('SELECTED_GOAL_ID');
         updateNewProjectHelp();
-        await loadSharedGoalsAndProjects(workspaceId);
+        await loadSharedProjectsAndPillars(workspaceId);
         // A pick from the previous workspace doesn't carry over.
         timerTargetSource = null;
         refreshTimerTargetFromTab();
-    });
-}
-
-// Shared goal change: narrow projects to the goal's, and persist to storage
-if (sharedGoal) {
-    sharedGoal.addEventListener('change', () => {
-        const goalId = sharedGoal.value;
-        if (goalId) {
-            chrome.storage.local.set({ SELECTED_GOAL_ID: goalId });
-        } else {
-            chrome.storage.local.remove('SELECTED_GOAL_ID');
-        }
-        renderSharedProjects(sharedProject.value);
     });
 }
 
@@ -937,6 +1108,11 @@ if (sharedProject) {
         if (projectId) {
             if (isListening) stopListening();
             chrome.storage.local.set({ SELECTED_PROJECT_ID: projectId });
+            // Choosing a project ticks its Pillars (those this picker shows).
+            const project = sharedProjectsCache.find(p => p.id === projectId) || null;
+            const next = ExpoPillarCapture.pillarsAfterProjectChoice(
+                tickedPillarIds, project, sharedPillarsCache.map(p => p.id));
+            if (next.length !== tickedPillarIds.length) setTickedPillars(next);
         }
         syncResourceProjectUi();
     });
@@ -1099,11 +1275,7 @@ async function apiLinkActionsToTranscription(actionIds, transcriptionSessionId) 
 }
 
 async function createActionForRecording(name, sessionId) {
-    const projectId = await getSelectedProjectId();
-    if (hasProjects && !projectId) {
-        if (sharedProject) sharedProject.focus();
-        throw new Error('Please select a project first');
-    }
+    const placement = await actionPlacement();
 
     const body = {
         json: {
@@ -1113,9 +1285,7 @@ async function createActionForRecording(name, sessionId) {
             parseNaturalLanguage: true,
         }
     };
-    if (projectId && projectId !== 'default') {
-        body.json.projectId = projectId;
-    }
+    Object.assign(body.json, placement);
 
     const response = await authenticatedFetch(`${apiBaseURL}/api/trpc/action.quickCreate`, {
         method: 'POST',
@@ -2610,7 +2780,7 @@ function onTrackTimeInputChanged() {
 
 // ── Track Time: the "What's this for?" picker ───────────────────────────
 // One pick, a Ticket or a Project (exponential-app: "Log timer time against
-// Tickets"). It replaces the shared Goal and Project selects on this tab;
+// Tickets"). It replaces the shared Pillars and Project selects on this tab;
 // the shared Workspace select stays and scopes the search.
 
 const TIMER_TARGET_SEARCH_DEBOUNCE_MS = 150;
@@ -3555,6 +3725,9 @@ async function saveTabAsResource(tab, { queue = false, index = false, descriptio
         }
         if (workspaceId) input.workspaceId = workspaceId;
         if (project) input.projectId = project.id;
+        // The ticked Pillars, when the page is filed in the workspace they belong to.
+        const tagIds = pillarTagIdsFor(workspaceId);
+        if (tagIds) input.tagIds = tagIds;
 
         result.hadBody = !!body;
         result.hadPageText = !!pageText;
@@ -3645,7 +3818,7 @@ async function handleResourceSave() {
 let resourceUiProjectId;
 
 // Called whenever the shared picker's project may have changed: by hand, or
-// because the list was reloaded for another workspace or goal.
+// because the list was reloaded for another workspace.
 function syncResourceProjectUi() {
     if (!hasSavePage) return;
     const project = selectedProject();
@@ -4099,9 +4272,7 @@ async function switchToLinkedProject(key, link, button) {
             if (workspaceId) chrome.storage.local.set({ SELECTED_WORKSPACE_ID: workspaceId });
             updateNewProjectHelp();
         }
-        // A goal filter could hide the project; the load below clears it.
-        chrome.storage.local.remove('SELECTED_GOAL_ID');
-        await loadSharedGoalsAndProjects(workspaceId, { projectId: link.projectId });
+        await loadSharedProjectsAndPillars(workspaceId, { projectId: link.projectId });
         if (sharedProject.value === link.projectId) {
             sharedProject.dispatchEvent(new Event('change'));
         }
@@ -4196,12 +4367,7 @@ async function createNewProject() {
 
         // Only if the picker still shows the workspace the project went into.
         if (sharedWorkspace.value === workspaceId) {
-            sharedProjectsCache.push({ id: project.id, name: project.name || name, slug: project.slug });
-            // A goal filter would hide a project that belongs to no goal yet.
-            if (sharedGoal && sharedGoal.value) {
-                sharedGoal.value = '';
-                chrome.storage.local.remove('SELECTED_GOAL_ID');
-            }
+            sharedProjectsCache.push({ id: project.id, name: project.name || name, slug: project.slug, pillarTagIds: [] });
             renderSharedProjects(project.id);
             // The picker's own handler persists the selection.
             sharedProject.dispatchEvent(new Event('change'));
@@ -4241,7 +4407,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const allTabs = [tabSavePageBtn, tabCreateActionBtn, tabAddContactBtn, tabTrackTimeBtn, tabRecordingBtn].filter(Boolean);
     const allPanels = [panelSavePage, panelCreateAction, panelAddContact, panelTrackTime, panelRecording].filter(Boolean);
 
-    const sharedSelectorSummary = sharedProjectSelector ? sharedProjectSelector.querySelector('summary') : null;
+    // The label part of the summary; the ticked-Pillars part beside it is its own element.
+    const sharedSelectorSummary = document.getElementById('sharedSelectorLabel')
+        || (sharedProjectSelector ? sharedProjectSelector.querySelector('summary') : null);
     const sharedSelectorSummaryText = sharedSelectorSummary ? sharedSelectorSummary.textContent : '';
 
     function switchTab(activeTab, activePanel) {
@@ -4249,7 +4417,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         allPanels.forEach(p => p.classList.remove('active'));
         if (activeTab) activeTab.classList.add('active');
         if (activePanel) activePanel.classList.add('active');
-        // On Track Time the "What's this for?" picker replaces Goal and Project.
+        // On Track Time the "What's this for?" picker replaces Pillars and Project.
         const timerMode = activePanel === panelTrackTime;
         if (sharedProjectSelector) sharedProjectSelector.classList.toggle('timer-mode', timerMode);
         if (sharedSelectorSummary) sharedSelectorSummary.textContent = timerMode ? 'Workspace' : sharedSelectorSummaryText;
@@ -4368,11 +4536,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             savePageBtn.disabled = true;
             savePageBtn.textContent = 'Saving...';
             try {
-                const projectId = await getSelectedProjectId();
-                if (hasProjects && !projectId) {
-                    if (sharedProject) sharedProject.focus();
-                    throw new Error('Please select a project first');
-                }
+                const placement = await actionPlacement();
                 const context = savePageContext ? savePageContext.value : '';
                 const description = (savePageDescToggle && savePageDescToggle.checked && savePageDesc)
                     ? savePageDesc.value.trim()
@@ -4386,9 +4550,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         parseNaturalLanguage: true,
                     }
                 };
-                if (projectId && projectId !== 'default') {
-                    body.json.projectId = projectId;
-                }
+                Object.assign(body.json, placement);
                 const response = await authenticatedFetch(`${apiBaseURL}/api/trpc/action.quickCreate`, {
                     method: 'POST',
                     body: JSON.stringify(body)
@@ -4505,11 +4667,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             createActionBtn.disabled = true;
             createActionBtn.textContent = 'Creating...';
             try {
-                const projectId = await getSelectedProjectId();
-                if (hasProjects && !projectId) {
-                    if (sharedProject) sharedProject.focus();
-                    throw new Error('Please select a project first');
-                }
+                const placement = await actionPlacement();
                 const description = createActionDesc ? createActionDesc.value.trim() : '';
                 const priority = createActionPriority ? createActionPriority.value : 'Quick';
                 const body = {
@@ -4520,9 +4678,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         parseNaturalLanguage: true,
                     }
                 };
-                if (projectId && projectId !== 'default') {
-                    body.json.projectId = projectId;
-                }
+                Object.assign(body.json, placement);
                 const response = await authenticatedFetch(`${apiBaseURL}/api/trpc/action.quickCreate`, {
                     method: 'POST',
                     body: JSON.stringify(body)
