@@ -462,7 +462,7 @@ let tickedPillarIds = [];
 // The workspace the cached Pillars and ticks belong to. Empty while another
 // workspace's Pillars are loading, so stale ticks are never sent or stored.
 let pillarsWorkspaceId = '';
-// Suggestions for the open page (pillar.suggest): Pillars ticked only because
+// Suggestions for the open page, matched in the browser: Pillars ticked only because
 // this page matched them, the suggestions the person unticked here, and which
 // page (workspace + address) they belong to.
 let autoTickedPillarIds = [];
@@ -510,8 +510,22 @@ function setTickedPillars(ids) {
     if (sharedProject && sharedProjectsCache.length > 0) renderSharedProjects(sharedProject.value);
 }
 
+// The ticked Pillars on the selector's summary line, so they are in view even
+// while the selector is collapsed: a save is never filed under Pillars the
+// person cannot see.
+function renderPillarSummary() {
+    const el = document.getElementById('sharedPillarsSummary');
+    if (!el) return;
+    const ticked = sharedPillarsCache.filter(p => tickedPillarIds.includes(p.id));
+    el.textContent = ticked.length === 0
+        ? ''
+        : ticked.map(p => (suggestedPillarIds.includes(p.id) ? `✦ ${p.name}` : p.name)).join(', ');
+    el.hidden = ticked.length === 0;
+}
+
 function renderSharedPillars() {
     if (!sharedPillars) return;
+    renderPillarSummary();
     sharedPillars.replaceChildren();
     sharedPillars.hidden = sharedPillarsCache.length === 0;
     if (sharedPillarsCache.length === 0) return;
@@ -550,9 +564,11 @@ if (sharedPillars) {
 }
 
 /**
- * Pre-tick the Pillars that match the open page (pillar.suggest), for the
- * person to see and untick. Moving to another page takes back the ticks only
- * the previous page's suggestions made; ticks the person made stay.
+ * Pre-tick the Pillars that match the open page, for the person to see and
+ * untick. The page is matched here, against the Pillars already downloaded:
+ * nothing about it leaves the browser before Save (docs/adr/0001). Moving to
+ * another page takes back the ticks only the previous page's suggestions
+ * made; ticks the person made stay.
  */
 async function refreshPillarSuggestions() {
     if (!sharedPillars || typeof chrome.tabs === 'undefined') return;
@@ -581,19 +597,9 @@ async function refreshPillarSuggestions() {
     suggestionText = text;
     if (!key || sharedPillarsCache.length === 0) return;
 
-    let suggested = [];
-    try {
-        const json = await trpcCall('pillar.suggest', { workspaceId, text }, 'GET');
-        suggested = extractTrpcData(json) || [];
-    } catch (error) {
-        // No suggestions is a fine answer; capture works without them.
-        console.error('Error suggesting pillars:', error);
-        return;
-    }
     // Another page, or another workspace, superseded this one.
     if (seq !== suggestionSeq) return;
-    const offered = new Set(sharedPillarsCache.map(p => p.id));
-    suggestedPillarIds = suggested.filter(id => offered.has(id));
+    suggestedPillarIds = ExpoPillarCapture.suggestPillars(sharedPillarsCache, text);
     const next = ExpoPillarCapture.applySuggestions({
         ticked: tickedPillarIds, auto: autoTickedPillarIds,
         declined: declinedSuggestionIds, suggested: suggestedPillarIds,
@@ -4401,7 +4407,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const allTabs = [tabSavePageBtn, tabCreateActionBtn, tabAddContactBtn, tabTrackTimeBtn, tabRecordingBtn].filter(Boolean);
     const allPanels = [panelSavePage, panelCreateAction, panelAddContact, panelTrackTime, panelRecording].filter(Boolean);
 
-    const sharedSelectorSummary = sharedProjectSelector ? sharedProjectSelector.querySelector('summary') : null;
+    // The label part of the summary; the ticked-Pillars part beside it is its own element.
+    const sharedSelectorSummary = document.getElementById('sharedSelectorLabel')
+        || (sharedProjectSelector ? sharedProjectSelector.querySelector('summary') : null);
     const sharedSelectorSummaryText = sharedSelectorSummary ? sharedSelectorSummary.textContent : '';
 
     function switchTab(activeTab, activePanel) {

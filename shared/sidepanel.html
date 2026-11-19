@@ -656,6 +656,19 @@
       .pillar-chip:hover {
         border-color: var(--border-strong);
       }
+      /* The ticked Pillars, on the collapsed selector's summary line */
+      .pillar-summary {
+        margin-left: var(--space-xs);
+        padding: 1px 8px;
+        border-radius: var(--radius-pill);
+        background: var(--color-primary-soft);
+        color: var(--color-primary-text);
+        font-size: var(--font-size-xs);
+        font-weight: var(--font-weight-medium);
+      }
+      .shared-project-selector.timer-mode .pillar-summary {
+        display: none;
+      }
       /* Ticked (or offered) because the open page matched it */
       .pillar-chip[data-suggested="true"]::before {
         content: "✦ ";
@@ -1852,7 +1865,7 @@
 
     <!-- Shared workspace/project selector (above tabs) - Collapsible for progressive disclosure -->
     <details class="shared-project-selector" id="sharedProjectSelector">
-      <summary>Workspace, Pillars & Project</summary>
+      <summary><span id="sharedSelectorLabel">Workspace, Pillars & Project</span><span class="pillar-summary" id="sharedPillarsSummary" aria-label="Ticked Pillars" hidden></span></summary>
       <div style="padding-top: 8px;">
         <select class="shared-select" id="sharedWorkspace">
           <option value="">Select workspace...</option>

@@ -1,6 +1,8 @@
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const {
+    keywords,
+    suggestPillars,
     projectsForPillars,
     pillarsAfterProjectChoice,
     applySuggestions,
@@ -67,5 +69,28 @@ describe('suggested Pillars for the open page', () => {
         state = personToggled(state, 'ops');            // untick
         state = personToggled(state, 'ops');            // tick again: now the person's
         assert.deepEqual(forgetPageSuggestions(state).ticked, ['ops']);
+    });
+});
+
+describe('matching the page against Pillars, in the browser', () => {
+    const ops = { id: 'ops', name: 'DevOps', description: 'Deploys, backups, monitoring and on-call for production infrastructure.' };
+    const gtm = { id: 'gtm', name: 'Go-to-market', description: 'Pricing, launches, positioning, sales and marketing campaigns.' };
+    const health = { id: 'health', name: 'Health', description: null };
+
+    test('keywords drop short words, stopwords, URL noise and words with digits', () => {
+        assert.deepEqual([...keywords('https://www.example.com/the-backups-are-running-v2-2026')], ['example', 'backup', 'runn']);
+    });
+
+    test('suggests a Pillar named in the text', () => {
+        assert.deepEqual(suggestPillars([ops, gtm, health], 'Health check for the new gym routine'), ['health']);
+    });
+
+    test('suggests a Pillar sharing two keywords with its description', () => {
+        assert.deepEqual(suggestPillars([ops, gtm], 'Postgres backups failing in production https://example.com/x'), ['ops']);
+    });
+
+    test('does not suggest on a single shared keyword, or for empty text', () => {
+        assert.deepEqual(suggestPillars([ops, gtm], 'Production of the school play'), []);
+        assert.deepEqual(suggestPillars([ops], '   '), []);
     });
 });
