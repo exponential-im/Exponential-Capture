@@ -459,6 +459,9 @@ let lastRealProjectId = '';
 const PILLAR_TICKS_KEY = 'SELECTED_PILLAR_IDS_BY_WORKSPACE';
 let sharedPillarsCache = [];
 let tickedPillarIds = [];
+// The workspace the cached Pillars and ticks belong to. Empty while another
+// workspace's Pillars are loading, so stale ticks are never sent or stored.
+let pillarsWorkspaceId = '';
 // Suggestions for the open page (pillar.suggest): Pillars ticked only because
 // this page matched them, the suggestions the person unticked here, and which
 // page (workspace + address) they belong to.
@@ -488,7 +491,7 @@ async function storedPillarTicks(workspaceId) {
 }
 
 async function persistPillarTicks() {
-    const workspaceId = sharedWorkspace ? sharedWorkspace.value : '';
+    const workspaceId = pillarsWorkspaceId;
     if (!workspaceId) return;
     const stored = await chrome.storage.local.get([PILLAR_TICKS_KEY]);
     const byWorkspace = stored[PILLAR_TICKS_KEY] || {};
@@ -636,7 +639,8 @@ async function actionPlacement() {
 /** The ticked Pillars to send with a capture filed into `workspaceId`, if any. */
 function pillarTagIdsFor(workspaceId) {
     const selected = sharedWorkspace ? sharedWorkspace.value : '';
-    return workspaceId && workspaceId === selected && tickedPillarIds.length > 0
+    return workspaceId && workspaceId === selected && workspaceId === pillarsWorkspaceId
+        && tickedPillarIds.length > 0
         ? [...tickedPillarIds]
         : undefined;
 }
@@ -679,6 +683,12 @@ async function loadSharedProjectsAndPillars(workspaceId, { projectId } = {}) {
     if (!sharedProject) return;
     const seq = ++sharedLoadSeq;
     sharedProject.innerHTML = '<option value="">Loading projects...</option>';
+    // The previous workspace's Pillars and ticks stop applying now, not when
+    // the new ones arrive.
+    pillarsWorkspaceId = '';
+    sharedPillarsCache = [];
+    tickedPillarIds = [];
+    renderSharedPillars();
     const [projects, pillars, ticks] = await Promise.all([
         workspaceId ? fetchProjectsForWorkspace(workspaceId) : fetchProjects(),
         fetchPillarsForWorkspace(workspaceId),
@@ -688,6 +698,7 @@ async function loadSharedProjectsAndPillars(workspaceId, { projectId } = {}) {
     if (seq !== sharedLoadSeq) return;
     sharedProjectsCache = projects || [];
     sharedPillarsCache = pillars;
+    pillarsWorkspaceId = workspaceId || '';
     const offered = new Set(pillars.map(p => p.id));
     tickedPillarIds = ticks.filter(id => offered.has(id));
     // Fresh Pillars: suggestions start over for the open page.
