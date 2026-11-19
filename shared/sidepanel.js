@@ -462,6 +462,15 @@ let tickedPillarIds = [];
 // The workspace the cached Pillars and ticks belong to. Empty while another
 // workspace's Pillars are loading, so stale ticks are never sent or stored.
 let pillarsWorkspaceId = '';
+// Suggestions for the open page, matched in the browser: Pillars ticked only because
+// this page matched them, the suggestions the person unticked here, and which
+// page (workspace + address) they belong to.
+let autoTickedPillarIds = [];
+let declinedSuggestionIds = [];
+let suggestedPillarIds = [];
+let suggestionPageKey = '';
+let suggestionText = '';
+let suggestionSeq = 0;
 
 async function fetchPillarsForWorkspace(workspaceId) {
     if (!workspaceId) return [];
@@ -486,7 +495,8 @@ async function persistPillarTicks() {
     if (!workspaceId) return;
     const stored = await chrome.storage.local.get([PILLAR_TICKS_KEY]);
     const byWorkspace = stored[PILLAR_TICKS_KEY] || {};
-    byWorkspace[workspaceId] = tickedPillarIds;
+    // A tick only this page's suggestion made is not the person's choice.
+    byWorkspace[workspaceId] = tickedPillarIds.filter(id => !autoTickedPillarIds.includes(id));
     await chrome.storage.local.set({ [PILLAR_TICKS_KEY]: byWorkspace });
 }
 
@@ -500,8 +510,22 @@ function setTickedPillars(ids) {
     if (sharedProject && sharedProjectsCache.length > 0) renderSharedProjects(sharedProject.value);
 }
 
+// The ticked Pillars on the selector's summary line, so they are in view even
+// while the selector is collapsed: a save is never filed under Pillars the
+// person cannot see.
+function renderPillarSummary() {
+    const el = document.getElementById('sharedPillarsSummary');
+    if (!el) return;
+    const ticked = sharedPillarsCache.filter(p => tickedPillarIds.includes(p.id));
+    el.textContent = ticked.length === 0
+        ? ''
+        : ticked.map(p => (suggestedPillarIds.includes(p.id) ? `✦ ${p.name}` : p.name)).join(', ');
+    el.hidden = ticked.length === 0;
+}
+
 function renderSharedPillars() {
     if (!sharedPillars) return;
+    renderPillarSummary();
     sharedPillars.replaceChildren();
     sharedPillars.hidden = sharedPillarsCache.length === 0;
     if (sharedPillarsCache.length === 0) return;
@@ -517,6 +541,10 @@ function renderSharedPillars() {
         chip.dataset.pillarId = pillar.id;
         chip.setAttribute('aria-pressed', tickedPillarIds.includes(pillar.id) ? 'true' : 'false');
         if (pillar.description) chip.title = pillar.description;
+        if (suggestedPillarIds.includes(pillar.id)) {
+            chip.dataset.suggested = 'true';
+            chip.title = `Suggested for this page${pillar.description ? ` — ${pillar.description}` : ''}`;
+        }
         sharedPillars.appendChild(chip);
     });
 }
@@ -526,10 +554,69 @@ if (sharedPillars) {
         const chip = event.target.closest('.pillar-chip');
         if (!chip) return;
         const id = chip.dataset.pillarId;
-        setTickedPillars(tickedPillarIds.includes(id)
-            ? tickedPillarIds.filter(x => x !== id)
-            : [...tickedPillarIds, id]);
+        const next = ExpoPillarCapture.personToggled({
+            ticked: tickedPillarIds, auto: autoTickedPillarIds, declined: declinedSuggestionIds,
+        }, id);
+        autoTickedPillarIds = next.auto;
+        declinedSuggestionIds = next.declined;
+        setTickedPillars(next.ticked);
     });
+}
+
+/**
+ * Pre-tick the Pillars that match the open page, for the person to see and
+ * untick. The page is matched here, against the Pillars already downloaded:
+ * nothing about it leaves the browser before Save (docs/adr/0001). Moving to
+ * another page takes back the ticks only the previous page's suggestions
+ * made; ticks the person made stay.
+ */
+async function refreshPillarSuggestions() {
+    if (!sharedPillars || typeof chrome.tabs === 'undefined') return;
+    const workspaceId = sharedWorkspace ? sharedWorkspace.value : '';
+    let tab = null;
+    try {
+        [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    } catch { tab = null; }
+    const url = tab && /^https?:/.test(tab.url || '') ? ExpoPageIdentity.savedAddress(tab.url) : null;
+    const key = workspaceId && url ? `${workspaceId}|${url}` : '';
+    // The title arrives after the address, so the same page is asked again
+    // once it has one; the person's unticks on it still hold.
+    const text = url ? `${tab.title || ''} ${url}`.slice(0, 4000) : '';
+    if (key === suggestionPageKey && text === suggestionText) return;
+
+    const seq = ++suggestionSeq;
+    if (key !== suggestionPageKey) {
+        const back = ExpoPillarCapture.forgetPageSuggestions({ ticked: tickedPillarIds, auto: autoTickedPillarIds });
+        suggestionPageKey = key;
+        autoTickedPillarIds = back.auto;
+        declinedSuggestionIds = [];
+        suggestedPillarIds = [];
+        if (back.ticked.length !== tickedPillarIds.length) setTickedPillars(back.ticked);
+        else renderSharedPillars();
+    }
+    suggestionText = text;
+    if (!key || sharedPillarsCache.length === 0) return;
+
+    // Another page, or another workspace, superseded this one.
+    if (seq !== suggestionSeq) return;
+    suggestedPillarIds = ExpoPillarCapture.suggestPillars(sharedPillarsCache, text);
+    const next = ExpoPillarCapture.applySuggestions({
+        ticked: tickedPillarIds, auto: autoTickedPillarIds,
+        declined: declinedSuggestionIds, suggested: suggestedPillarIds,
+    });
+    autoTickedPillarIds = next.auto;
+    if (next.ticked.length !== tickedPillarIds.length) setTickedPillars(next.ticked);
+    else renderSharedPillars();
+}
+
+if (typeof chrome !== 'undefined' && chrome.tabs) {
+    chrome.tabs.onActivated.addListener(() => refreshPillarSuggestions());
+    chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+        if (tab.active && (changeInfo.url || changeInfo.title || changeInfo.status === 'complete')) {
+            refreshPillarSuggestions();
+        }
+    });
+    if (chrome.windows) chrome.windows.onFocusChanged.addListener(() => refreshPillarSuggestions());
 }
 
 /**
@@ -620,7 +707,14 @@ async function loadSharedProjectsAndPillars(workspaceId, { projectId } = {}) {
     pillarsWorkspaceId = workspaceId || '';
     const offered = new Set(pillars.map(p => p.id));
     tickedPillarIds = ticks.filter(id => offered.has(id));
+    // Fresh Pillars: suggestions start over for the open page.
+    autoTickedPillarIds = [];
+    declinedSuggestionIds = [];
+    suggestedPillarIds = [];
+    suggestionPageKey = '';
+    suggestionText = '';
     renderSharedPillars();
+    refreshPillarSuggestions();
     renderSharedProjects(projectId);
     // The timer picker may have opened before this list arrived.
     syncTimerTargetToSharedProject();
@@ -4313,7 +4407,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const allTabs = [tabSavePageBtn, tabCreateActionBtn, tabAddContactBtn, tabTrackTimeBtn, tabRecordingBtn].filter(Boolean);
     const allPanels = [panelSavePage, panelCreateAction, panelAddContact, panelTrackTime, panelRecording].filter(Boolean);
 
-    const sharedSelectorSummary = sharedProjectSelector ? sharedProjectSelector.querySelector('summary') : null;
+    // The label part of the summary; the ticked-Pillars part beside it is its own element.
+    const sharedSelectorSummary = document.getElementById('sharedSelectorLabel')
+        || (sharedProjectSelector ? sharedProjectSelector.querySelector('summary') : null);
     const sharedSelectorSummaryText = sharedSelectorSummary ? sharedSelectorSummary.textContent : '';
 
     function switchTab(activeTab, activePanel) {
