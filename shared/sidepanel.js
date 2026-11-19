@@ -36,6 +36,7 @@ const sharedProjectSelector = document.getElementById('sharedProjectSelector');
 const sharedWorkspace = document.getElementById('sharedWorkspace');
 const sharedProject = document.getElementById('sharedProject');
 const sharedGoal = document.getElementById('sharedGoal');
+const sharedPillars = document.getElementById('sharedPillars');
 
 // Tab elements
 const panelTabs = document.getElementById('panelTabs');
@@ -464,6 +465,89 @@ const NEW_PROJECT_VALUE = '__new__';
 // (or cancelling) leaves the selection where it was.
 let lastRealProjectId = '';
 
+// --- Pillars (exponential-app ADR-0085) ---
+// The workspace's active Pillars and the ticked ones. Ticks are remembered per
+// workspace: a Pillar belongs to one workspace, so another workspace's ticks
+// never apply.
+const PILLAR_TICKS_KEY = 'SELECTED_PILLAR_IDS_BY_WORKSPACE';
+let sharedPillarsCache = [];
+let tickedPillarIds = [];
+
+async function fetchPillarsForWorkspace(workspaceId) {
+    if (!workspaceId) return [];
+    try {
+        const json = await trpcCall('pillar.list', { workspaceId }, 'GET');
+        return extractTrpcData(json) || [];
+    } catch (error) {
+        // An app without Pillars yet (or a network blip): capture works without them.
+        console.error('Error fetching pillars for workspace:', error);
+        return [];
+    }
+}
+
+async function storedPillarTicks(workspaceId) {
+    const stored = await chrome.storage.local.get([PILLAR_TICKS_KEY]);
+    const byWorkspace = stored[PILLAR_TICKS_KEY] || {};
+    return Array.isArray(byWorkspace[workspaceId]) ? byWorkspace[workspaceId] : [];
+}
+
+async function persistPillarTicks() {
+    const workspaceId = sharedWorkspace ? sharedWorkspace.value : '';
+    if (!workspaceId) return;
+    const stored = await chrome.storage.local.get([PILLAR_TICKS_KEY]);
+    const byWorkspace = stored[PILLAR_TICKS_KEY] || {};
+    byWorkspace[workspaceId] = tickedPillarIds;
+    await chrome.storage.local.set({ [PILLAR_TICKS_KEY]: byWorkspace });
+}
+
+function setTickedPillars(ids) {
+    // Only Pillars this workspace offers can stay ticked.
+    const offered = new Set(sharedPillarsCache.map(p => p.id));
+    tickedPillarIds = [...new Set(ids)].filter(id => offered.has(id));
+    renderSharedPillars();
+    persistPillarTicks();
+}
+
+function renderSharedPillars() {
+    if (!sharedPillars) return;
+    sharedPillars.replaceChildren();
+    sharedPillars.hidden = sharedPillarsCache.length === 0;
+    if (sharedPillarsCache.length === 0) return;
+    const label = document.createElement('span');
+    label.className = 'pillar-chips-label';
+    label.textContent = 'Pillars';
+    sharedPillars.appendChild(label);
+    sharedPillarsCache.forEach(pillar => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'pillar-chip';
+        chip.textContent = pillar.name;
+        chip.dataset.pillarId = pillar.id;
+        chip.setAttribute('aria-pressed', tickedPillarIds.includes(pillar.id) ? 'true' : 'false');
+        if (pillar.description) chip.title = pillar.description;
+        sharedPillars.appendChild(chip);
+    });
+}
+
+if (sharedPillars) {
+    sharedPillars.addEventListener('click', (event) => {
+        const chip = event.target.closest('.pillar-chip');
+        if (!chip) return;
+        const id = chip.dataset.pillarId;
+        setTickedPillars(tickedPillarIds.includes(id)
+            ? tickedPillarIds.filter(x => x !== id)
+            : [...tickedPillarIds, id]);
+    });
+}
+
+/** The ticked Pillars to send with a capture filed into `workspaceId`, if any. */
+function pillarTagIdsFor(workspaceId) {
+    const selected = sharedWorkspace ? sharedWorkspace.value : '';
+    return workspaceId && workspaceId === selected && tickedPillarIds.length > 0
+        ? [...tickedPillarIds]
+        : undefined;
+}
+
 function renderSharedGoals(preselectId) {
     if (!sharedGoal) return;
     sharedGoal.innerHTML = '<option value="" data-searchable-keep>All goals</option>';
@@ -521,14 +605,20 @@ async function loadSharedGoalsAndProjects(workspaceId, { goalId, projectId } = {
     if (!sharedProject) return;
     const seq = ++sharedLoadSeq;
     sharedProject.innerHTML = '<option value="">Loading projects...</option>';
-    const [goals, projects] = await Promise.all([
+    const [goals, projects, pillars, ticks] = await Promise.all([
         fetchGoalsForWorkspace(workspaceId),
         workspaceId ? fetchProjectsForWorkspace(workspaceId) : fetchProjects(),
+        fetchPillarsForWorkspace(workspaceId),
+        workspaceId ? storedPillarTicks(workspaceId) : Promise.resolve([]),
     ]);
     // A newer workspace change superseded this load.
     if (seq !== sharedLoadSeq) return;
     sharedGoalsCache = goals;
     sharedProjectsCache = projects || [];
+    sharedPillarsCache = pillars;
+    const offered = new Set(pillars.map(p => p.id));
+    tickedPillarIds = ticks.filter(id => offered.has(id));
+    renderSharedPillars();
     renderSharedGoals(goalId);
     renderSharedProjects(projectId);
     // The timer picker may have opened before this list arrived.
@@ -3555,6 +3645,9 @@ async function saveTabAsResource(tab, { queue = false, index = false, descriptio
         }
         if (workspaceId) input.workspaceId = workspaceId;
         if (project) input.projectId = project.id;
+        // The ticked Pillars, when the page is filed in the workspace they belong to.
+        const tagIds = pillarTagIdsFor(workspaceId);
+        if (tagIds) input.tagIds = tagIds;
 
         result.hadBody = !!body;
         result.hadPageText = !!pageText;
