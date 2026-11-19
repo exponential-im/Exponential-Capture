@@ -656,6 +656,10 @@
       .pillar-chip:hover {
         border-color: var(--border-strong);
       }
+      /* Ticked (or offered) because the open page matched it */
+      .pillar-chip[data-suggested="true"]::before {
+        content: "✦ ";
+      }
       .pillar-chip[aria-pressed="true"] {
         border-color: var(--color-primary);
         background: var(--color-primary-soft);

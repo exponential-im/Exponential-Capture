@@ -1,6 +1,12 @@
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const { projectsForPillars, pillarsAfterProjectChoice } = require('../shared/pillar-capture.js');
+const {
+    projectsForPillars,
+    pillarsAfterProjectChoice,
+    applySuggestions,
+    forgetPageSuggestions,
+    personToggled,
+} = require('../shared/pillar-capture.js');
 
 const railway = { id: 'railway', name: 'Railway move', pillarTagIds: ['ops'] };
 const launch = { id: 'launch', name: 'Launch week', pillarTagIds: ['gtm'] };
@@ -34,5 +40,32 @@ describe('pillarsAfterProjectChoice', () => {
 
     test('changes nothing when the project is cleared', () => {
         assert.deepEqual(pillarsAfterProjectChoice(['gtm'], null), ['gtm']);
+    });
+});
+
+describe('suggested Pillars for the open page', () => {
+    test('ticks suggestions not already ticked or declined, remembering they were automatic', () => {
+        assert.deepEqual(
+            applySuggestions({ ticked: ['gtm'], auto: [], declined: ['health'], suggested: ['ops', 'gtm', 'health'] }),
+            { ticked: ['gtm', 'ops'], auto: ['ops'] },
+        );
+    });
+
+    test('moving to another page takes back only the automatic ticks', () => {
+        assert.deepEqual(forgetPageSuggestions({ ticked: ['gtm', 'ops'], auto: ['ops'] }), { ticked: ['gtm'], auto: [] });
+    });
+
+    test('a click makes the chip the person\'s own; an untick is declined for this page', () => {
+        const unticked = personToggled({ ticked: ['gtm', 'ops'], auto: ['ops'], declined: [] }, 'ops');
+        assert.deepEqual(unticked, { ticked: ['gtm'], auto: [], declined: ['ops'] });
+        // Declined: the same suggestion does not tick it again on this page.
+        assert.deepEqual(applySuggestions({ ...unticked, suggested: ['ops'] }).ticked, ['gtm']);
+    });
+
+    test('a suggestion the person keeps by clicking it twice stays theirs across pages', () => {
+        let state = { ticked: ['ops'], auto: ['ops'], declined: [] };
+        state = personToggled(state, 'ops');            // untick
+        state = personToggled(state, 'ops');            // tick again: now the person's
+        assert.deepEqual(forgetPageSuggestions(state).ticked, ['ops']);
     });
 });

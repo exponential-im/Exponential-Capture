@@ -28,7 +28,47 @@
         return [...new Set([...ticked, ...fromProject])];
     }
 
-    const api = { projectsForPillars, pillarsAfterProjectChoice };
+    // Suggested Pillars for the open page (pillar.suggest). A suggestion ticks
+    // a Pillar for the person to see and untick; it never files anything by
+    // itself. `auto` is the Pillars ticked only because this page suggested
+    // them; `declined` the suggestions the person unticked on this page, which
+    // are not ticked again.
+    function applySuggestions({ ticked, auto, declined, suggested }) {
+        const nextTicked = (ticked || []).slice();
+        const nextAuto = (auto || []).slice();
+        const no = new Set(declined || []);
+        for (const id of suggested || []) {
+            if (nextTicked.includes(id) || no.has(id)) continue;
+            nextTicked.push(id);
+            nextAuto.push(id);
+        }
+        return { ticked: nextTicked, auto: nextAuto };
+    }
+
+    // Moving to another page takes back the ticks only the previous page's
+    // suggestions made. Ticks the person made, or kept, stay.
+    function forgetPageSuggestions({ ticked, auto }) {
+        const fromPage = new Set(auto || []);
+        return { ticked: (ticked || []).filter(id => !fromPage.has(id)), auto: [] };
+    }
+
+    // The person clicked a chip: it is theirs now, whichever way it went. An
+    // untick of a page suggestion is remembered so it is not ticked again.
+    function personToggled({ ticked, auto, declined }, id) {
+        const wasTicked = (ticked || []).includes(id);
+        const nextTicked = wasTicked ? ticked.filter(x => x !== id) : [...(ticked || []), id];
+        const nextDeclined = (declined || []).slice();
+        if (wasTicked && !nextDeclined.includes(id)) nextDeclined.push(id);
+        return { ticked: nextTicked, auto: (auto || []).filter(x => x !== id), declined: nextDeclined };
+    }
+
+    const api = {
+        projectsForPillars,
+        pillarsAfterProjectChoice,
+        applySuggestions,
+        forgetPageSuggestions,
+        personToggled,
+    };
     globalThis.ExpoPillarCapture = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
