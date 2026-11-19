@@ -1,5 +1,5 @@
 // Capture asks Workspace, then Pillars, then an optional Project
-// (exponential-app ADR-0085). The pure rules of that picker, the same ones the
+// (exponential-app ADR-0086). The pure rules of that picker, the same ones the
 // app's CapturePlacement follows (src/app/_components/pillars/captureRules.ts).
 //
 // A project is the server's `project.getUserProjects` row:

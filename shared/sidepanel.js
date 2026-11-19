@@ -452,7 +452,7 @@ const NEW_PROJECT_VALUE = '__new__';
 // (or cancelling) leaves the selection where it was.
 let lastRealProjectId = '';
 
-// --- Pillars (exponential-app ADR-0085) ---
+// --- Pillars (exponential-app ADR-0086) ---
 // The workspace's active Pillars and the ticked ones. Ticks are remembered per
 // workspace: a Pillar belongs to one workspace, so another workspace's ticks
 // never apply.
